@@ -6,7 +6,7 @@
 struct repository;
 
 /**
- * Refer to Documentation/technical/api-parse-options.txt for the API doc.
+ * Refer to Documentation/technical/api-parse-options.adoc for the API doc.
  */
 
 enum parse_opt_type {
@@ -25,7 +25,7 @@ enum parse_opt_type {
 	/* options with arguments (usually) */
 	OPTION_STRING,
 	OPTION_INTEGER,
-	OPTION_MAGNITUDE,
+	OPTION_UNSIGNED,
 	OPTION_CALLBACK,
 	OPTION_LOWLEVEL_CALLBACK,
 	OPTION_FILENAME
@@ -57,7 +57,8 @@ enum parse_opt_option_flags {
 };
 
 enum parse_opt_result {
-	PARSE_OPT_COMPLETE = -3,
+	PARSE_OPT_COMPLETE = -4,
+	PARSE_OPT_HELP_ERROR = -3,
 	PARSE_OPT_HELP = -2,
 	PARSE_OPT_ERROR = -1,	/* must be the same as error() */
 	PARSE_OPT_DONE = 0,	/* fixed so that "return 0" works */
@@ -92,6 +93,10 @@ typedef int parse_opt_subcommand_fn(int argc, const char **argv,
  * `value`::
  *   stores pointers to the values to be filled.
  *
+ * `precision`::
+ *   precision of the integer pointed to by `value` in number of bytes. Should
+ *   typically be its `sizeof()`.
+ *
  * `argh`::
  *   token to explain the kind of argument this option wants. Does not
  *   begin in capital letter, and does not end with a full stop.
@@ -113,6 +118,7 @@ typedef int parse_opt_subcommand_fn(int argc, const char **argv,
  *   PARSE_OPT_OPTARG: says that the argument is optional (not for BOOLEANs)
  *   PARSE_OPT_NOARG: says that this option does not take an argument
  *   PARSE_OPT_NONEG: says that this option cannot be negated
+ *                   (i.e. rejects "--no-<option>")
  *   PARSE_OPT_HIDDEN: this option is skipped in the default usage, and
  *                     shown only in the full usage.
  *   PARSE_OPT_LASTARG_DEFAULT: says that this option will take the default
@@ -151,6 +157,7 @@ struct option {
 	int short_name;
 	const char *long_name;
 	void *value;
+	size_t precision;
 	const char *argh;
 	const char *help;
 
@@ -167,6 +174,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG|(f), \
 	.callback = NULL, \
@@ -177,6 +185,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG|(f), \
 }
@@ -185,6 +194,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG | (f), \
 	.defval = (i), \
@@ -213,7 +223,8 @@ struct option {
 	.type = OPTION_INTEGER, \
 	.short_name = (s), \
 	.long_name = (l), \
-	.value = (v), \
+	.value = (v) + BARF_UNLESS_SIGNED(*(v)), \
+	.precision = sizeof(*v), \
 	.argh = N_("n"), \
 	.help = (h), \
 	.flags = (f), \
@@ -226,12 +237,18 @@ struct option {
 	.type = OPTION_GROUP, \
 	.help = (h), \
 }
+#define OPT_HIDDEN_GROUP(h) { \
+	.type = OPTION_GROUP, \
+	.help = (h), \
+	.flags = PARSE_OPT_HIDDEN, \
+}
 #define OPT_BIT(s, l, v, h, b)      OPT_BIT_F(s, l, v, h, b, 0)
 #define OPT_BITOP(s, l, v, h, set, clear) { \
 	.type = OPTION_BITOP, \
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG|PARSE_OPT_NONEG, \
 	.defval = (set), \
@@ -242,6 +259,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG, \
 	.defval = (b), \
@@ -254,6 +272,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_NOARG | PARSE_OPT_HIDDEN, \
 	.defval = 1, \
@@ -263,6 +282,7 @@ struct option {
 	.short_name = (s), \
 	.long_name = (l), \
 	.value = (v), \
+	.precision = sizeof(*v), \
 	.help = (h), \
 	.flags = PARSE_OPT_CMDMODE|PARSE_OPT_NOARG|PARSE_OPT_NONEG | (f), \
 	.defval = (i), \
@@ -270,11 +290,12 @@ struct option {
 #define OPT_CMDMODE(s, l, v, h, i)  OPT_CMDMODE_F(s, l, v, h, i, 0)
 
 #define OPT_INTEGER(s, l, v, h)     OPT_INTEGER_F(s, l, v, h, 0)
-#define OPT_MAGNITUDE(s, l, v, h) { \
-	.type = OPTION_MAGNITUDE, \
+#define OPT_UNSIGNED(s, l, v, h) { \
+	.type = OPTION_UNSIGNED, \
 	.short_name = (s), \
 	.long_name = (l), \
-	.value = (v), \
+	.value = (v) + BARF_UNLESS_UNSIGNED(*(v)), \
+	.precision = sizeof(*v), \
 	.argh = N_("n"), \
 	.help = (h), \
 	.flags = PARSE_OPT_NONEG, \
@@ -433,6 +454,15 @@ static inline void die_for_incompatible_opt3(int opt1, const char *opt1_name,
 	die_for_incompatible_opt4(opt1, opt1_name,
 				  opt2, opt2_name,
 				  opt3, opt3_name,
+				  0, "");
+}
+
+static inline void die_for_incompatible_opt2(int opt1, const char *opt1_name,
+					     int opt2, const char *opt2_name)
+{
+	die_for_incompatible_opt4(opt1, opt1_name,
+				  opt2, opt2_name,
+				  0, "",
 				  0, "");
 }
 
@@ -600,6 +630,8 @@ int parse_opt_tracking_mode(const struct option *, const char *, int);
 #define OPT_PATHSPEC_FROM_FILE(v) OPT_FILENAME(0, "pathspec-from-file", v, N_("read pathspec from file"))
 #define OPT_PATHSPEC_FILE_NUL(v)  OPT_BOOL(0, "pathspec-file-nul", v, N_("with --pathspec-from-file, pathspec elements are separated with NUL character"))
 #define OPT_AUTOSTASH(v) OPT_BOOL(0, "autostash", v, N_("automatically stash/stash pop before and after"))
+#define OPT_DIFF_UNIFIED(v) OPT_INTEGER_F('U', "unified", v, N_("generate diffs with <n> lines context"), PARSE_OPT_NONEG)
+#define OPT_DIFF_INTERHUNK_CONTEXT(v) OPT_INTEGER_F(0, "inter-hunk-context", v, N_("show context between diff hunks up to the specified number of lines"), PARSE_OPT_NONEG)
 
 #define OPT_IPVERSION(v) \
 	OPT_SET_INT_F('4', "ipv4", (v), N_("use IPv4 addresses only"), \

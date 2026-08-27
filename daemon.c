@@ -244,14 +244,14 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 	}
 
 	enter_repo_flags = strict_paths ? ENTER_REPO_STRICT : 0;
-	path = enter_repo(dir, enter_repo_flags);
+	path = enter_repo(the_repository, dir, enter_repo_flags);
 	if (!path && base_path && base_path_relaxed) {
 		/*
 		 * if we fail and base_path_relaxed is enabled, try without
 		 * prefixing the base path
 		 */
 		dir = directory;
-		path = enter_repo(dir, enter_repo_flags);
+		path = enter_repo(the_repository, dir, enter_repo_flags);
 	}
 
 	if (!path) {
@@ -402,7 +402,7 @@ static int run_service(const char *dir, struct daemon_service *service,
 
 	if (service->overridable) {
 		strbuf_addf(&var, "daemon.%s", service->config_name);
-		git_config_get_bool(var.buf, &enabled);
+		repo_config_get_bool(the_repository, var.buf, &enabled);
 		strbuf_release(&var);
 	}
 	if (!enabled) {
@@ -674,9 +674,20 @@ static void lookup_hostname(struct hostinfo *hi)
 
 		gai = getaddrinfo(hi->hostname.buf, NULL, &hints, &ai);
 		if (!gai) {
-			struct sockaddr_in *sin_addr = (void *)ai->ai_addr;
+			void *addr;
 
-			inet_ntop(AF_INET, &sin_addr->sin_addr,
+			if (ai->ai_family == AF_INET) {
+				struct sockaddr_in *sa = (void *)ai->ai_addr;
+				addr = &sa->sin_addr;
+			} else if (ai->ai_family == AF_INET6) {
+				struct sockaddr_in6 *sa6 = (void *)ai->ai_addr;
+				addr = &sa6->sin6_addr;
+			} else {
+				die("unexpected address family: %d",
+				    ai->ai_family);
+			}
+
+			inet_ntop(ai->ai_family, addr,
 				  addrbuf, sizeof(addrbuf));
 			strbuf_addstr(&hi->ip_address, addrbuf);
 
@@ -742,7 +753,7 @@ static int execute(void)
 	struct strvec env = STRVEC_INIT;
 
 	if (addr)
-		loginfo("Connection from %s:%s", addr, port);
+		loginfo("Connection from %s:%s", addr, port ? port : "?");
 
 	set_keep_alive(0);
 	alarm(init_timeout ? init_timeout : timeout);
@@ -915,11 +926,9 @@ static void handle(int incoming, struct sockaddr *addr, socklen_t addrlen)
 static void child_handler(int signo UNUSED)
 {
 	/*
-	 * Otherwise empty handler because systemcalls will get interrupted
-	 * upon signal receipt
-	 * SysV needs the handler to be rearmed
+	 * Otherwise empty handler because systemcalls should get interrupted
+	 * upon signal receipt.
 	 */
-	signal(SIGCHLD, child_handler);
 }
 
 static int set_reuse_addr(int sockfd)
@@ -938,7 +947,7 @@ struct socketlist {
 	size_t alloc;
 };
 
-static const char *ip2str(int family, struct sockaddr *sin, socklen_t len)
+static const char *ip2str(int family, struct sockaddr *sin)
 {
 #ifdef NO_IPV6
 	static char ip[INET_ADDRSTRLEN];
@@ -949,11 +958,11 @@ static const char *ip2str(int family, struct sockaddr *sin, socklen_t len)
 	switch (family) {
 #ifndef NO_IPV6
 	case AF_INET6:
-		inet_ntop(family, &((struct sockaddr_in6*)sin)->sin6_addr, ip, len);
+		inet_ntop(family, &((struct sockaddr_in6*)sin)->sin6_addr, ip, sizeof(ip));
 		break;
 #endif
 	case AF_INET:
-		inet_ntop(family, &((struct sockaddr_in*)sin)->sin_addr, ip, len);
+		inet_ntop(family, &((struct sockaddr_in*)sin)->sin_addr, ip, sizeof(ip));
 		break;
 	default:
 		xsnprintf(ip, sizeof(ip), "<unknown>");
@@ -990,11 +999,6 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 		sockfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (sockfd < 0)
 			continue;
-		if (sockfd >= FD_SETSIZE) {
-			logerror("Socket descriptor too large");
-			close(sockfd);
-			continue;
-		}
 
 #ifdef IPV6_V6ONLY
 		if (ai->ai_family == AF_INET6) {
@@ -1015,14 +1019,14 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 
 		if (bind(sockfd, ai->ai_addr, ai->ai_addrlen) < 0) {
 			logerror("Could not bind to %s: %s",
-				 ip2str(ai->ai_family, ai->ai_addr, ai->ai_addrlen),
+				 ip2str(ai->ai_family, ai->ai_addr),
 				 strerror(errno));
 			close(sockfd);
 			continue;	/* not fatal */
 		}
 		if (listen(sockfd, 5) < 0) {
 			logerror("Could not listen to %s: %s",
-				 ip2str(ai->ai_family, ai->ai_addr, ai->ai_addrlen),
+				 ip2str(ai->ai_family, ai->ai_addr),
 				 strerror(errno));
 			close(sockfd);
 			continue;	/* not fatal */
@@ -1076,7 +1080,7 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 
 	if ( bind(sockfd, (struct sockaddr *)&sin, sizeof sin) < 0 ) {
 		logerror("Could not bind to %s: %s",
-			 ip2str(AF_INET, (struct sockaddr *)&sin, sizeof(sin)),
+			 ip2str(AF_INET, (struct sockaddr *)&sin),
 			 strerror(errno));
 		close(sockfd);
 		return 0;
@@ -1084,7 +1088,7 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 
 	if (listen(sockfd, 5) < 0) {
 		logerror("Could not listen to %s: %s",
-			 ip2str(AF_INET, (struct sockaddr *)&sin, sizeof(sin)),
+			 ip2str(AF_INET, (struct sockaddr *)&sin),
 			 strerror(errno));
 		close(sockfd);
 		return 0;
@@ -1120,6 +1124,7 @@ static void socksetup(struct string_list *listen_addr, int listen_port, struct s
 
 static int service_loop(struct socketlist *socklist)
 {
+	struct sigaction sa;
 	struct pollfd *pfd;
 
 	CALLOC_ARRAY(pfd, socklist->nr);
@@ -1129,7 +1134,10 @@ static int service_loop(struct socketlist *socklist)
 		pfd[i].events = POLLIN;
 	}
 
-	signal(SIGCHLD, child_handler);
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_NOCLDSTOP;
+	sa.sa_handler = child_handler;
+	sigaction(SIGCHLD, &sa, NULL);
 
 	for (;;) {
 		check_dead_children();
@@ -1153,11 +1161,19 @@ static int service_loop(struct socketlist *socklist)
 #endif
 				} ss;
 				socklen_t sslen = sizeof(ss);
-				int incoming = accept(pfd[i].fd, &ss.sa, &sslen);
+				int incoming;
+				int retry = 3;
+
+			redo:
+				incoming = accept(pfd[i].fd, &ss.sa, &sslen);
 				if (incoming < 0) {
 					switch (errno) {
-					case EAGAIN:
 					case EINTR:
+						if (--retry)
+							goto redo;
+
+						/* fallthrough */
+					case EAGAIN:
 					case ECONNABORTED:
 						continue;
 					default:

@@ -1,5 +1,7 @@
 #include "unit-test.h"
+#include "hex.h"
 #include "parse-options.h"
+#include "strbuf.h"
 #include "string-list.h"
 #include "strvec.h"
 
@@ -27,6 +29,7 @@ int cmd_main(int argc, const char **argv)
 		OPT_NOOP_NOARG('d', "debug"),
 		OPT_NOOP_NOARG(0, "github-workflow-markup"),
 		OPT_NOOP_NOARG(0, "no-bin-wrappers"),
+		OPT_NOOP_ARG(0, "no-chain-lint"),
 		OPT_NOOP_ARG(0, "root"),
 		OPT_NOOP_ARG(0, "stress"),
 		OPT_NOOP_NOARG(0, "tee"),

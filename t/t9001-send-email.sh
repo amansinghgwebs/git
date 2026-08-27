@@ -201,6 +201,13 @@ test_expect_success $PREREQ 'cc trailer with get_maintainer.pl output' '
 	test_cmp expected-cc commandline1
 '
 
+test_expect_failure $PREREQ 'invalid smtp server port value' '
+	clean_fake_sendmail &&
+	git send-email -1 --to=recipient@example.com \
+		--smtp-server-port=bogus-symbolic-name \
+		--smtp-server="$(pwd)/fake.sendmail"
+'
+
 test_expect_success $PREREQ 'setup expect' "
 cat >expected-show-all-headers <<\EOF
 0001-Second.patch
@@ -341,9 +348,9 @@ test_expect_success $PREREQ 'Prompting works' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches \
 		2>errors &&
-		grep "^From: A U Thor <author@example.com>\$" msgtxt1 &&
-		grep "^To: to@example.com\$" msgtxt1 &&
-		grep "^In-Reply-To: <my-message-id@example.com>" msgtxt1
+		test_grep "^From: A U Thor <author@example.com>\$" msgtxt1 &&
+		test_grep "^To: to@example.com\$" msgtxt1 &&
+		test_grep "^In-Reply-To: <my-message-id@example.com>" msgtxt1
 '
 
 test_expect_success $PREREQ,AUTOIDENT 'implicit ident is allowed' '
@@ -396,7 +403,7 @@ test_expect_success $PREREQ 'tocmd works' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		tocmd.patch \
 		&&
-	grep "^To: tocmd@example.com" msgtxt1
+	test_grep "^To: tocmd@example.com" msgtxt1
 '
 
 test_expect_success $PREREQ 'cccmd works' '
@@ -410,7 +417,7 @@ test_expect_success $PREREQ 'cccmd works' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		cccmd.patch \
 		&&
-	grep "^	cccmd@example.com" msgtxt1
+	test_grep "^	cccmd@example.com" msgtxt1
 '
 
 test_expect_success $PREREQ 'headercmd works' '
@@ -424,7 +431,7 @@ test_expect_success $PREREQ 'headercmd works' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		headercmd.patch \
 		&&
-	grep "^X-Debbugs-CC: dummy@example.com" msgtxt1
+	test_grep "^X-Debbugs-CC: dummy@example.com" msgtxt1
 '
 
 test_expect_success $PREREQ '--no-header-cmd works' '
@@ -439,7 +446,7 @@ test_expect_success $PREREQ '--no-header-cmd works' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		headercmd.patch \
 		&&
-	! grep "^X-Debbugs-CC: dummy@example.com" msgtxt1
+	test_grep ! "^X-Debbugs-CC: dummy@example.com" msgtxt1
 '
 
 test_expect_success $PREREQ 'multiline fields are correctly unfolded' '
@@ -457,7 +464,7 @@ FoldedField: This is a tale
 		--header-cmd=./headercmd-multiline \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		headercmd.patch &&
-	grep "^FoldedField: This is a tale best told using multiple lines.$" msgtxt1
+	test_grep "^FoldedField: This is a tale best told using multiple lines.$" msgtxt1
 '
 
 # Blank lines in the middle of the output of a command are invalid.
@@ -514,7 +521,7 @@ test_expect_success $PREREQ 'Author From: in message body' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
 	sed "1,/^\$/d" <msgtxt1 >msgbody1 &&
-	grep "From: A <author@example.com>" msgbody1
+	test_grep "From: A <author@example.com>" msgbody1
 '
 
 test_expect_success $PREREQ 'Author From: not in message body' '
@@ -525,7 +532,7 @@ test_expect_success $PREREQ 'Author From: not in message body' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
 	sed "1,/^\$/d" <msgtxt1 >msgbody1 &&
-	! grep "From: A <author@example.com>" msgbody1
+	test_grep ! "From: A <author@example.com>" msgbody1
 '
 
 test_expect_success $PREREQ 'allow long lines with --no-validate' '
@@ -546,7 +553,7 @@ test_expect_success $PREREQ 'short lines with auto encoding are 8bit' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		--transfer-encoding=auto \
 		$patches &&
-	grep "Content-Transfer-Encoding: 8bit" msgtxt1
+	test_grep "Content-Transfer-Encoding: 8bit" msgtxt1
 '
 
 test_expect_success $PREREQ 'long lines with auto encoding are quoted-printable' '
@@ -558,7 +565,7 @@ test_expect_success $PREREQ 'long lines with auto encoding are quoted-printable'
 		--transfer-encoding=auto \
 		--no-validate \
 		longline.patch &&
-	grep "Content-Transfer-Encoding: quoted-printable" msgtxt1
+	test_grep "Content-Transfer-Encoding: quoted-printable" msgtxt1
 '
 
 test_expect_success $PREREQ 'carriage returns with auto encoding are quoted-printable' '
@@ -572,7 +579,7 @@ test_expect_success $PREREQ 'carriage returns with auto encoding are quoted-prin
 		--transfer-encoding=auto \
 		--no-validate \
 		cr.patch &&
-	grep "Content-Transfer-Encoding: quoted-printable" msgtxt1
+	test_grep "Content-Transfer-Encoding: quoted-printable" msgtxt1
 '
 
 for enc in auto quoted-printable base64
@@ -698,7 +705,7 @@ do
 			--smtp-server="$(pwd)/fake.sendmail" \
 			--transfer-encoding=$enc \
 			$patches &&
-		grep "Content-Transfer-Encoding: $enc" msgtxt1
+		test_grep "Content-Transfer-Encoding: $enc" msgtxt1
 	'
 done
 
@@ -711,7 +718,7 @@ test_expect_success $PREREQ 'Invalid In-Reply-To' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches \
 		2>errors &&
-	! grep "^In-Reply-To: < *>" msgtxt1
+	test_grep ! "^In-Reply-To: < *>" msgtxt1
 '
 
 test_expect_success $PREREQ 'Valid In-Reply-To when prompting' '
@@ -722,7 +729,7 @@ test_expect_success $PREREQ 'Valid In-Reply-To when prompting' '
 	) | GIT_SEND_EMAIL_NOTTY=1 git send-email \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches 2>errors &&
-	! grep "^In-Reply-To: < *>" msgtxt1
+	test_grep ! "^In-Reply-To: < *>" msgtxt1
 '
 
 test_expect_success $PREREQ 'In-Reply-To without --chain-reply-to' '
@@ -785,8 +792,8 @@ test_expect_success $PREREQ 'fake editor dies with error' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches 2>err &&
-	grep "I am about to error" err &&
-	grep "the editor exited uncleanly, aborting everything" err
+	test_grep "I am about to error" err &&
+	test_grep "the editor exited uncleanly, aborting everything" err
 '
 
 test_expect_success $PREREQ 'setup fake editor' '
@@ -807,11 +814,11 @@ test_expect_success $PREREQ '--compose works' '
 '
 
 test_expect_success $PREREQ 'first message is compose text' '
-	grep "^fake edit" msgtxt1
+	test_grep "^fake edit" msgtxt1
 '
 
 test_expect_success $PREREQ 'second message is patch' '
-	grep "Subject:.*Second" msgtxt2
+	test_grep "Subject:.*Second" msgtxt2
 '
 
 test_expect_success $PREREQ 'setup expect' "
@@ -1230,8 +1237,8 @@ test_expect_success $PREREQ '--compose adds MIME for utf8 body' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^utf8 body" msgtxt1 &&
-	grep "^Content-Type: text/plain; charset=UTF-8" msgtxt1
+	test_grep "^utf8 body" msgtxt1 &&
+	test_grep "^Content-Type: text/plain; charset=UTF-8" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose respects user mime type' '
@@ -1253,9 +1260,9 @@ test_expect_success $PREREQ '--compose respects user mime type' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^utf8 body" msgtxt1 &&
-	grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1 &&
-	! grep "^Content-Type: text/plain; charset=UTF-8" msgtxt1
+	test_grep "^utf8 body" msgtxt1 &&
+	test_grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1 &&
+	test_grep ! "^Content-Type: text/plain; charset=UTF-8" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose adds MIME for utf8 subject' '
@@ -1267,8 +1274,8 @@ test_expect_success $PREREQ '--compose adds MIME for utf8 subject' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^fake edit" msgtxt1 &&
-	grep "^Subject: =?UTF-8?q?utf8-s=C3=BCbj=C3=ABct?=" msgtxt1
+	test_grep "^fake edit" msgtxt1 &&
+	test_grep "^Subject: =?UTF-8?q?utf8-s=C3=BCbj=C3=ABct?=" msgtxt1
 '
 
 test_expect_success $PREREQ 'utf8 author is correctly passed on' '
@@ -1281,7 +1288,7 @@ test_expect_success $PREREQ 'utf8 author is correctly passed on' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		funny_name.patch &&
-	grep "^From: Füñný Nâmé <odd_?=mail@example.com>" msgtxt1
+	test_grep "^From: Füñný Nâmé <odd_?=mail@example.com>" msgtxt1
 '
 
 test_expect_success $PREREQ 'utf8 sender is not duplicated' '
@@ -1354,8 +1361,8 @@ test_expect_success $PREREQ 'sendemail.composeencoding works' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^utf8 body" msgtxt1 &&
-	grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1
+	test_grep "^utf8 body" msgtxt1 &&
+	test_grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose-encoding works' '
@@ -1371,8 +1378,8 @@ test_expect_success $PREREQ '--compose-encoding works' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^utf8 body" msgtxt1 &&
-	grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1
+	test_grep "^utf8 body" msgtxt1 &&
+	test_grep "^Content-Type: text/plain; charset=iso-8859-1" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose-encoding overrides sendemail.composeencoding' '
@@ -1389,8 +1396,8 @@ test_expect_success $PREREQ '--compose-encoding overrides sendemail.composeencod
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^utf8 body" msgtxt1 &&
-	grep "^Content-Type: text/plain; charset=iso-8859-2" msgtxt1
+	test_grep "^utf8 body" msgtxt1 &&
+	test_grep "^Content-Type: text/plain; charset=iso-8859-2" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose-encoding adds correct MIME for subject' '
@@ -1403,8 +1410,8 @@ test_expect_success $PREREQ '--compose-encoding adds correct MIME for subject' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		$patches &&
-	grep "^fake edit" msgtxt1 &&
-	grep "^Subject: =?iso-8859-2?q?utf8-s=C3=BCbj=C3=ABct?=" msgtxt1
+	test_grep "^fake edit" msgtxt1 &&
+	test_grep "^Subject: =?iso-8859-2?q?utf8-s=C3=BCbj=C3=ABct?=" msgtxt1
 '
 
 test_expect_success $PREREQ 'detects ambiguous reference/file conflict' '
@@ -1412,7 +1419,22 @@ test_expect_success $PREREQ 'detects ambiguous reference/file conflict' '
 	git add main &&
 	git commit -m"add main" &&
 	test_must_fail git send-email --dry-run main 2>errors &&
-	grep disambiguate errors
+	test_grep disambiguate errors
+'
+
+test_expect_success $PREREQ 'missing subject omits Perl location' '
+	cat >no-subject.patch <<-\EOF &&
+	This is the body.
+	EOF
+	test_must_fail git send-email \
+		--dry-run \
+		--from="Example <nobody@example.com>" \
+		--to=nobody@example.com \
+		no-subject.patch 2>actual &&
+	cat >expect <<-\EOF &&
+	No '\''Subject:'\'' line in '\''no-subject.patch'\''
+	EOF
+	test_cmp expect actual
 '
 
 test_expect_success $PREREQ 'feed two files' '
@@ -1436,7 +1458,7 @@ test_expect_success $PREREQ 'in-reply-to but no threading' '
 		--in-reply-to="<in-reply-id@example.com>" \
 		--no-thread \
 		$patches >out &&
-	grep "In-Reply-To: <in-reply-id@example.com>" out
+	test_grep "In-Reply-To: <in-reply-id@example.com>" out
 '
 
 test_expect_success $PREREQ 'no in-reply-to and no threading' '
@@ -1446,7 +1468,7 @@ test_expect_success $PREREQ 'no in-reply-to and no threading' '
 		--to=nobody@example.com \
 		--no-thread \
 		$patches >stdout &&
-	! grep "In-Reply-To: " stdout
+	test_grep ! "In-Reply-To: " stdout
 '
 
 test_expect_success $PREREQ 'threading but no chain-reply-to' '
@@ -1457,7 +1479,7 @@ test_expect_success $PREREQ 'threading but no chain-reply-to' '
 		--thread \
 		--no-chain-reply-to \
 		$patches $patches >stdout &&
-	grep "In-Reply-To: " stdout
+	test_grep "In-Reply-To: " stdout
 '
 
 test_expect_success $PREREQ 'override in-reply-to if no threading' '
@@ -1468,7 +1490,7 @@ test_expect_success $PREREQ 'override in-reply-to if no threading' '
 		--no-thread \
 		--in-reply-to="override" \
 		$threaded_patches >stdout &&
-	grep "In-Reply-To: <override>" stdout
+	test_grep "In-Reply-To: <override>" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.to works' '
@@ -1477,7 +1499,7 @@ test_expect_success $PREREQ 'sendemail.to works' '
 		--dry-run \
 		--from="Example <nobody@example.com>" \
 		$patches >stdout &&
-	grep "To: Somebody <somebody@ex.com>" stdout
+	test_grep "To: Somebody <somebody@ex.com>" stdout
 '
 
 test_expect_success $PREREQ 'setup sendemail.identity' '
@@ -1491,7 +1513,7 @@ test_expect_success $PREREQ 'sendemail.identity: reads the correct identity conf
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: cloud@example.com" stdout
+	test_grep "To: cloud@example.com" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.identity: identity overrides sendemail.identity' '
@@ -1500,7 +1522,7 @@ test_expect_success $PREREQ 'sendemail.identity: identity overrides sendemail.id
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: isp@example.com" stdout
+	test_grep "To: isp@example.com" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.identity: --no-identity clears previous identity' '
@@ -1509,7 +1531,7 @@ test_expect_success $PREREQ 'sendemail.identity: --no-identity clears previous i
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: default@example.com" stdout
+	test_grep "To: default@example.com" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.identity: bool identity variable existence overrides' '
@@ -1520,8 +1542,8 @@ test_expect_success $PREREQ 'sendemail.identity: bool identity variable existenc
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: cloud@example.com" stdout &&
-	! grep "X-Mailer" stdout
+	test_grep "To: cloud@example.com" stdout &&
+	test_grep ! "X-Mailer" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.identity: bool variable fallback' '
@@ -1531,8 +1553,8 @@ test_expect_success $PREREQ 'sendemail.identity: bool variable fallback' '
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: cloud@example.com" stdout &&
-	! grep "X-Mailer" stdout
+	test_grep "To: cloud@example.com" stdout &&
+	test_grep ! "X-Mailer" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.identity: bool variable without a value' '
@@ -1541,8 +1563,8 @@ test_expect_success $PREREQ 'sendemail.identity: bool variable without a value' 
 		--dry-run \
 		--from="nobody@example.com" \
 		$patches >stdout &&
-	grep "To: default@example.com" stdout &&
-	grep "X-Mailer" stdout
+	test_grep "To: default@example.com" stdout &&
+	test_grep "X-Mailer" stdout
 '
 
 test_expect_success $PREREQ '--no-to overrides sendemail.to' '
@@ -1552,8 +1574,8 @@ test_expect_success $PREREQ '--no-to overrides sendemail.to' '
 		--no-to \
 		--to=nobody@example.com \
 		$patches >stdout &&
-	grep "To: nobody@example.com" stdout &&
-	! grep "To: Somebody <somebody@ex.com>" stdout
+	test_grep "To: nobody@example.com" stdout &&
+	test_grep ! "To: Somebody <somebody@ex.com>" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.cc works' '
@@ -1563,7 +1585,7 @@ test_expect_success $PREREQ 'sendemail.cc works' '
 		--from="Example <nobody@example.com>" \
 		--to=nobody@example.com \
 		$patches >stdout &&
-	grep "Cc: Somebody <somebody@ex.com>" stdout
+	test_grep "Cc: Somebody <somebody@ex.com>" stdout
 '
 
 test_expect_success $PREREQ '--no-cc overrides sendemail.cc' '
@@ -1574,8 +1596,8 @@ test_expect_success $PREREQ '--no-cc overrides sendemail.cc' '
 		--cc=bodies@example.com \
 		--to=nobody@example.com \
 		$patches >stdout &&
-	grep "Cc: bodies@example.com" stdout &&
-	! grep "Cc: Somebody <somebody@ex.com>" stdout
+	test_grep "Cc: bodies@example.com" stdout &&
+	test_grep ! "Cc: Somebody <somebody@ex.com>" stdout
 '
 
 test_expect_success $PREREQ 'sendemail.bcc works' '
@@ -1586,7 +1608,7 @@ test_expect_success $PREREQ 'sendemail.bcc works' '
 		--to=nobody@example.com \
 		--smtp-server relay.example.com \
 		$patches >stdout &&
-	grep "RCPT TO:<other@ex.com>" stdout
+	test_grep "RCPT TO:<other@ex.com>" stdout
 '
 
 test_expect_success $PREREQ '--no-bcc overrides sendemail.bcc' '
@@ -1598,8 +1620,8 @@ test_expect_success $PREREQ '--no-bcc overrides sendemail.bcc' '
 		--to=nobody@example.com \
 		--smtp-server relay.example.com \
 		$patches >stdout &&
-	grep "RCPT TO:<bodies@example.com>" stdout &&
-	! grep "RCPT TO:<other@ex.com>" stdout
+	test_grep "RCPT TO:<bodies@example.com>" stdout &&
+	test_grep ! "RCPT TO:<other@ex.com>" stdout
 '
 
 test_expect_success $PREREQ 'patches To headers are used by default' '
@@ -1610,7 +1632,7 @@ test_expect_success $PREREQ 'patches To headers are used by default' '
 		--from="Example <nobody@example.com>" \
 		--smtp-server relay.example.com \
 		$patch >stdout &&
-	grep "RCPT TO:<bodies@example.com>" stdout
+	test_grep "RCPT TO:<bodies@example.com>" stdout
 '
 
 test_expect_success $PREREQ 'patches To headers are appended to' '
@@ -1622,8 +1644,8 @@ test_expect_success $PREREQ 'patches To headers are appended to' '
 		--to=nobody@example.com \
 		--smtp-server relay.example.com \
 		$patch >stdout &&
-	grep "RCPT TO:<bodies@example.com>" stdout &&
-	grep "RCPT TO:<nobody@example.com>" stdout
+	test_grep "RCPT TO:<bodies@example.com>" stdout &&
+	test_grep "RCPT TO:<nobody@example.com>" stdout
 '
 
 test_expect_success $PREREQ 'To headers from files reset each patch' '
@@ -1642,7 +1664,9 @@ test_expect_success $PREREQ 'To headers from files reset each patch' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-cat >email-using-8bit <<\EOF
+# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+# that contain multibyte chars.
+cat >email-using-8bit <<EOF
 From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 Message-ID: <bogus-message-id@example.com>
 From: author@example.com
@@ -1682,9 +1706,9 @@ test_expect_success $PREREQ 'asks about and fixes 8bit encodings' '
 	git send-email --from=author@example.com --to=nobody@example.com \
 			--smtp-server="$(pwd)/fake.sendmail" \
 			email-using-8bit >stdout &&
-	grep "do not declare a Content-Transfer-Encoding" stdout &&
-	grep email-using-8bit stdout &&
-	grep "Which 8bit encoding" stdout &&
+	test_grep "do not declare a Content-Transfer-Encoding" stdout &&
+	test_grep email-using-8bit stdout &&
+	test_grep "Declare which 8bit encoding to use" stdout &&
 	grep -E "Content|MIME" msgtxt1 >actual &&
 	test_cmp content-type-decl actual
 '
@@ -1728,7 +1752,9 @@ test_expect_success $PREREQ '--8bit-encoding overrides sendemail.8bitEncoding' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-	cat >email-using-8bit <<-\EOF
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >email-using-8bit <<-EOF
 	From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 	Message-ID: <bogus-message-id@example.com>
 	From: author@example.com
@@ -1757,7 +1783,9 @@ test_expect_success $PREREQ '--8bit-encoding also treats subject' '
 '
 
 test_expect_success $PREREQ 'setup expect' '
-	cat >email-using-8bit <<-\EOF
+	# NOTE: do not quote this heredoc, Dash 0.5.13 has a bug with heredocs
+	# that contain multibyte chars.
+	cat >email-using-8bit <<-EOF
 	From fe6ecc66ece37198fe5db91fa2fc41d9f4fe5cc4 Mon Sep 17 00:00:00 2001
 	Message-ID: <bogus-message-id@example.com>
 	From: A U Thor <author@example.com>
@@ -1777,7 +1805,7 @@ test_expect_success $PREREQ '--transfer-encoding overrides sendemail.transferEnc
 		--smtp-server="$(pwd)/fake.sendmail" \
 		email-using-8bit \
 		2>errors >out &&
-	grep "cannot send message as 7bit" errors &&
+	test_grep "cannot send message as 7bit" errors &&
 	test -z "$(ls msgtxt*)"
 '
 
@@ -1788,7 +1816,7 @@ test_expect_success $PREREQ 'sendemail.transferEncoding via config' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		email-using-8bit \
 		2>errors >out &&
-	grep "cannot send message as 7bit" errors &&
+	test_grep "cannot send message as 7bit" errors &&
 	test -z "$(ls msgtxt*)"
 '
 
@@ -1799,7 +1827,7 @@ test_expect_success $PREREQ 'sendemail.transferEncoding via cli' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		email-using-8bit \
 		2>errors >out &&
-	grep "cannot send message as 7bit" errors &&
+	test_grep "cannot send message as 7bit" errors &&
 	test -z "$(ls msgtxt*)"
 '
 
@@ -1926,7 +1954,7 @@ test_expect_success $PREREQ 'refusing to send cover letter template' '
 		outdir/0000-*.patch \
 		outdir/0001-*.patch \
 		2>errors >out &&
-	grep "SUBJECT HERE" errors &&
+	test_grep "SUBJECT HERE" errors &&
 	test -z "$(ls msgtxt*)"
 '
 
@@ -1943,7 +1971,7 @@ test_expect_success $PREREQ '--force sends cover letter template anyway' '
 		outdir/0000-*.patch \
 		outdir/0001-*.patch \
 		2>errors >out &&
-	! grep "SUBJECT HERE" errors &&
+	test_grep ! "SUBJECT HERE" errors &&
 	test -n "$(ls msgtxt*)"
 '
 
@@ -2003,8 +2031,8 @@ test_expect_success $PREREQ 'escaped quotes in sendemail.aliasfiletype=mutt' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		outdir/0001-*.patch \
 		2>errors >out &&
-	grep "^!somebody@example\.org!$" commandline1 &&
-	grep -F "To: \"Dot U. Sir\" <somebody@example.org>" out
+	test_grep "^!somebody@example\.org!$" commandline1 &&
+	test_grep -F "To: \"Dot U. Sir\" <somebody@example.org>" out
 '
 
 test_expect_success $PREREQ 'sendemail.aliasfiletype=mailrc' '
@@ -2018,7 +2046,7 @@ test_expect_success $PREREQ 'sendemail.aliasfiletype=mailrc' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		outdir/0001-*.patch \
 		2>errors >out &&
-	grep "^!somebody@example\.org!$" commandline1
+	test_grep "^!somebody@example\.org!$" commandline1
 '
 
 test_expect_success $PREREQ 'sendemail.aliasesfile=~/.mailrc' '
@@ -2032,7 +2060,7 @@ test_expect_success $PREREQ 'sendemail.aliasesfile=~/.mailrc' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		outdir/0001-*.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 test_dump_aliases () {
@@ -2251,7 +2279,7 @@ test_sendmail_aliases () {
 			2>errors >out &&
 		for i in $expect
 		do
-			grep "^!$i!$" commandline1 || return 1
+			test_grep "^!$i!$" commandline1 || return 1
 		done
 	'
 }
@@ -2315,7 +2343,7 @@ test_expect_success $PREREQ 'alias support in To header' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		aliased.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 test_expect_success $PREREQ 'alias support in Cc header' '
@@ -2329,7 +2357,7 @@ test_expect_success $PREREQ 'alias support in Cc header' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		aliased.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 test_expect_success $PREREQ 'tocmd works with aliases' '
@@ -2345,7 +2373,7 @@ test_expect_success $PREREQ 'tocmd works with aliases' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		tocmd.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 test_expect_success $PREREQ 'cccmd works with aliases' '
@@ -2361,7 +2389,7 @@ test_expect_success $PREREQ 'cccmd works with aliases' '
 		--smtp-server="$(pwd)/fake.sendmail" \
 		cccmd.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 do_xmailer_test () {
@@ -2498,7 +2526,7 @@ test_expect_success $PREREQ 'mailmap support with --to' '
 		--mailmap \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ 'sendemail.mailmap configuration' '
@@ -2515,7 +2543,7 @@ test_expect_success $PREREQ 'sendemail.mailmap configuration' '
 		--to=someone@example.org \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ 'sendemail.mailmap.file configuration' '
@@ -2532,7 +2560,7 @@ test_expect_success $PREREQ 'sendemail.mailmap.file configuration' '
 		--to=someone@example.org \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ 'sendemail.mailmap identity overrides configuration' '
@@ -2551,7 +2579,7 @@ test_expect_success $PREREQ 'sendemail.mailmap identity overrides configuration'
 		--to=someone@example.org \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ '--no-mailmap overrides configuration' '
@@ -2571,7 +2599,7 @@ test_expect_success $PREREQ '--no-mailmap overrides configuration' '
 		--no-mailmap \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.org!$" commandline1
+	test_grep "^!someone@example\.org!$" commandline1
 '
 
 test_expect_success $PREREQ 'mailmap support in To header' '
@@ -2587,7 +2615,7 @@ test_expect_success $PREREQ 'mailmap support in To header' '
 		--mailmap \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ 'mailmap support in Cc header' '
@@ -2603,7 +2631,7 @@ test_expect_success $PREREQ 'mailmap support in Cc header' '
 		--mailmap \
 		a.patch \
 		2>errors >out &&
-	grep "^!someone@example\.com!$" commandline1
+	test_grep "^!someone@example\.com!$" commandline1
 '
 
 test_expect_success $PREREQ 'test using command name with --sendmail-cmd' '
@@ -2663,9 +2691,9 @@ test_expect_success $PREREQ 'patch reply headers correct with --no-thread' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		has-reply.patch no-reply.patch &&
-	grep "In-Reply-To: <replied.to@example.com>" msgtxt1 &&
-	grep "References: <replied.to@example.com>" msgtxt1 &&
-	! grep replied.to@example.com msgtxt2
+	test_grep "In-Reply-To: <replied.to@example.com>" msgtxt1 &&
+	test_grep "References: <replied.to@example.com>" msgtxt1 &&
+	test_grep ! replied.to@example.com msgtxt2
 '
 
 test_expect_success $PREREQ 'cmdline in-reply-to used with --no-thread' '
@@ -2676,10 +2704,10 @@ test_expect_success $PREREQ 'cmdline in-reply-to used with --no-thread' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		has-reply.patch no-reply.patch &&
-	grep "In-Reply-To: <cmdline.reply@example.com>" msgtxt1 &&
-	grep "References: <cmdline.reply@example.com>" msgtxt1 &&
-	grep "In-Reply-To: <cmdline.reply@example.com>" msgtxt2 &&
-	grep "References: <cmdline.reply@example.com>" msgtxt2
+	test_grep "In-Reply-To: <cmdline.reply@example.com>" msgtxt1 &&
+	test_grep "References: <cmdline.reply@example.com>" msgtxt1 &&
+	test_grep "In-Reply-To: <cmdline.reply@example.com>" msgtxt2 &&
+	test_grep "References: <cmdline.reply@example.com>" msgtxt2
 '
 
 test_expect_success $PREREQ 'invoke hook' '
@@ -2762,7 +2790,7 @@ test_expect_success $PREREQ 'test that send-email works outside a repo' '
 test_expect_success $PREREQ 'send-email relays -v 3 to format-patch' '
 	test_when_finished "rm -f out" &&
 	git send-email --dry-run -v 3 -1 >out &&
-	grep "PATCH v3" out
+	test_grep "PATCH v3" out
 '
 
 test_expect_success $PREREQ 'test that sendmail config is rejected' '
@@ -2806,7 +2834,7 @@ test_expect_success $PREREQ '--compose handles lowercase headers' '
 		--to=nobody@example.com \
 		--smtp-server="$(pwd)/fake.sendmail" \
 		HEAD^ &&
-	grep "From: edited-from@example.com" msgtxt1
+	test_grep "From: edited-from@example.com" msgtxt1
 '
 
 test_expect_success $PREREQ '--compose handles to headers' '

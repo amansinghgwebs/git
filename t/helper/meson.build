@@ -34,7 +34,9 @@ test_tool_sources = [
   'test-match-trees.c',
   'test-mergesort.c',
   'test-mktemp.c',
+  'test-name-hash.c',
   'test-online-cpus.c',
+  'test-pack-deltas.c',
   'test-pack-mtimes.c',
   'test-parse-options.c',
   'test-parse-pathspec-file.c',
@@ -67,6 +69,7 @@ test_tool_sources = [
   'test-submodule-nested-repo-config.c',
   'test-submodule.c',
   'test-subprocess.c',
+  'test-synthesize.c',
   'test-tool.c',
   'test-trace2.c',
   'test-truncate.c',
@@ -75,18 +78,19 @@ test_tool_sources = [
   'test-windows-named-pipe.c',
   'test-write-cache.c',
   'test-xml-encode.c',
+  'test-zlib.c',
 ]
 
 test_tool = executable('test-tool',
   sources: test_tool_sources,
-  dependencies: [libgit, common_main],
+  dependencies: [libgit_commonmain],
 )
 bin_wrappers += test_tool
 test_dependencies += test_tool
 
 test_fake_ssh = executable('test-fake-ssh',
   sources: 'test-fake-ssh.c',
-  dependencies: [libgit, common_main],
+  dependencies: [libgit_commonmain],
 )
 bin_wrappers += test_fake_ssh
 test_dependencies += test_fake_ssh

@@ -126,7 +126,7 @@ static void hash_index_entry(struct index_state *istate, struct cache_entry *ce)
 		hashmap_add(&istate->name_hash, &ce->ent);
 	}
 
-	if (ignore_case)
+	if (repo_ignore_case(the_repository))
 		add_dir_entry(istate, ce);
 }
 
@@ -207,7 +207,7 @@ static int lookup_lazy_params(struct index_state *istate)
 	 * code to build the "istate->name_hash".  We don't
 	 * need the complexity here.
 	 */
-	if (!ignore_case)
+	if (!repo_ignore_case(the_repository))
 		return 0;
 
 	nr_cpus = online_cpus();
@@ -492,8 +492,10 @@ static void *lazy_name_thread_proc(void *_data)
 	for (k = 0; k < d->istate->cache_nr; k++) {
 		struct cache_entry *ce_k = d->istate->cache[k];
 		ce_k->ce_flags |= CE_HASHED;
-		hashmap_entry_init(&ce_k->ent, d->lazy_entries[k].hash_name);
-		hashmap_add(&d->istate->name_hash, &ce_k->ent);
+		if (!S_ISSPARSEDIR(ce_k->ce_mode)) {
+			hashmap_entry_init(&ce_k->ent, d->lazy_entries[k].hash_name);
+			hashmap_add(&d->istate->name_hash, &ce_k->ent);
+		}
 	}
 
 	return NULL;
@@ -649,7 +651,7 @@ void remove_name_hash(struct index_state *istate, struct cache_entry *ce)
 	ce->ce_flags &= ~CE_HASHED;
 	hashmap_remove(&istate->name_hash, &ce->ent, ce);
 
-	if (ignore_case)
+	if (repo_ignore_case(the_repository))
 		remove_dir_entry(istate, ce);
 }
 

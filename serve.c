@@ -10,10 +10,11 @@
 #include "upload-pack.h"
 #include "bundle-uri.h"
 #include "trace2.h"
+#include "promisor-remote.h"
 
 static int advertise_sid = -1;
 static int advertise_object_info = -1;
-static int client_hash_algo = GIT_HASH_SHA1;
+static uint32_t client_hash_algo = GIT_HASH_SHA1_LEGACY;
 
 static int always_advertise(struct repository *r UNUSED,
 			    struct strbuf *value UNUSED)
@@ -28,6 +29,29 @@ static int agent_advertise(struct repository *r UNUSED,
 		strbuf_addstr(value, git_user_agent_sanitized());
 	return 1;
 }
+
+static int promisor_remote_advertise(struct repository *r,
+				     struct strbuf *value)
+{
+	if (value) {
+		char *info = promisor_remote_info(r);
+		if (!info)
+			return 0;
+		strbuf_addstr(value, info);
+		free(info);
+	}
+	return 1;
+}
+
+static void promisor_remote_receive(struct repository *r,
+				    const char *remotes)
+{
+	if (!remotes)
+		die("promisor-remote capability requires an argument");
+
+	mark_promisor_remotes_as_accepted(r, remotes);
+}
+
 
 static int object_format_advertise(struct repository *r,
 				   struct strbuf *value)
@@ -68,7 +92,7 @@ static void session_id_receive(struct repository *r UNUSED,
 	trace2_data_string("transfer", NULL, "client-sid", client_sid);
 }
 
-static int object_info_advertise(struct repository *r, struct strbuf *value UNUSED)
+static int object_info_advertise(struct repository *r, struct strbuf *value)
 {
 	if (advertise_object_info == -1 &&
 	    repo_config_get_bool(r, "transfer.advertiseobjectinfo",
@@ -76,6 +100,9 @@ static int object_info_advertise(struct repository *r, struct strbuf *value UNUS
 		/* disabled by default */
 		advertise_object_info = 0;
 	}
+	/* Currently only size and type are supported */
+	if (value && advertise_object_info)
+		strbuf_addstr(value, "size type");
 	return advertise_object_info;
 }
 
@@ -154,6 +181,11 @@ static struct protocol_capability capabilities[] = {
 		.name = "bundle-uri",
 		.advertise = bundle_uri_advertise,
 		.command = bundle_uri_command,
+	},
+	{
+		.name = "promisor-remote",
+		.advertise = promisor_remote_advertise,
+		.receive = promisor_remote_receive,
 	},
 };
 

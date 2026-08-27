@@ -246,7 +246,11 @@ test_expect_success 'create bundle with --since option' '
 	EOF
 	test_cmp expect actual &&
 
-	git bundle create since.bdl \
+	# If a different name hash function is used, then one fewer
+	# delta base is found and this counts a different number
+	# of objects after performing --fix-thin.
+	GIT_TEST_NAME_HASH_VERSION=1 \
+		git bundle create since.bdl \
 		--since "Thu Apr 7 15:27:00 2005 -0700" \
 		--all &&
 
@@ -608,7 +612,7 @@ test_expect_success 'cloning from filtered bundle has useful error' '
 		--all \
 		--filter=blob:none &&
 	test_must_fail git clone --bare partial.bdl partial 2>err &&
-	grep "cannot clone from filtered bundle" err
+	test_grep "cannot clone from filtered bundle" err
 '
 
 test_expect_success 'verify catches unreachable, broken prerequisites' '
@@ -640,13 +644,13 @@ test_expect_success 'verify catches unreachable, broken prerequisites' '
 		# Verify should fail
 		test_must_fail git bundle verify \
 			../clone-from/tip.bundle 2>err &&
-		grep "some prerequisite commits .* are not connected" err &&
+		test_grep "some prerequisite commits .* are not connected" err &&
 		test_line_count = 1 err &&
 
 		# Unbundling should fail
 		test_must_fail git bundle unbundle \
 			../clone-from/tip.bundle 2>err &&
-		grep "some prerequisite commits .* are not connected" err &&
+		test_grep "some prerequisite commits .* are not connected" err &&
 		test_line_count = 1 err
 	)
 '
@@ -654,7 +658,7 @@ test_expect_success 'verify catches unreachable, broken prerequisites' '
 test_expect_success 'bundle progress includes write phase' '
 	GIT_PROGRESS_DELAY=0 \
 		git bundle create --progress out.bundle --all 2>err &&
-	grep 'Writing' err
+	test_grep 'Writing' err
 '
 
 test_expect_success TTY 'create --quiet disables all bundle progress' '
@@ -666,14 +670,67 @@ test_expect_success TTY 'create --quiet disables all bundle progress' '
 test_expect_success 'bundle progress with --no-quiet' '
 	GIT_PROGRESS_DELAY=0 \
 		git bundle create --no-quiet out.bundle --all 2>err &&
-	grep "%" err
+	test_grep "%" err
+'
+
+test_expect_success 'create bundle with duplicate refnames' '
+	git bundle create out.bdl "main" "main" &&
+
+	git bundle list-heads out.bdl |
+		make_user_friendly_and_stable_output >actual &&
+	cat >expect <<-\EOF &&
+	<COMMIT-P> refs/heads/main
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'create bundle with duplicate refnames and --all' '
+	git bundle create out.bdl --all "main" "main" &&
+
+	git bundle list-heads out.bdl |
+		make_user_friendly_and_stable_output >actual &&
+	cat >expect <<-\EOF &&
+	<COMMIT-P> refs/heads/main
+	<COMMIT-N> refs/heads/release
+	<COMMIT-D> refs/heads/topic/1
+	<COMMIT-H> refs/heads/topic/2
+	<COMMIT-D> refs/pull/1/head
+	<COMMIT-G> refs/pull/2/head
+	<TAG-1> refs/tags/v1
+	<TAG-2> refs/tags/v2
+	<TAG-3> refs/tags/v3
+	<COMMIT-P> HEAD
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'create bundle with duplicate exlusion refnames' '
+	git bundle create out.bdl "main" "main^!" &&
+
+	git bundle list-heads out.bdl |
+		make_user_friendly_and_stable_output >actual &&
+	cat >expect <<-\EOF &&
+	<COMMIT-P> refs/heads/main
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'create bundle with duplicate refname short-form' '
+	git bundle create out.bdl "main" "main" "refs/heads/main" "refs/heads/main" &&
+
+	git bundle list-heads out.bdl |
+		make_user_friendly_and_stable_output >actual &&
+	cat >expect <<-\EOF &&
+	<COMMIT-P> refs/heads/main
+	EOF
+	test_cmp expect actual
 '
 
 test_expect_success 'read bundle over stdin' '
 	git bundle create some.bundle HEAD &&
 
 	git bundle verify - <some.bundle 2>err &&
-	grep "<stdin> is okay" err &&
+	test_grep "<stdin> is okay" err &&
 
 	git bundle list-heads some.bundle >expect &&
 	git bundle list-heads - <some.bundle >actual &&

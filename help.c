@@ -2,12 +2,14 @@
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "git-zlib.h"
 #include "config.h"
 #include "builtin.h"
 #include "exec-cmd.h"
 #include "run-command.h"
 #include "levenshtein.h"
 #include "gettext.h"
+#include "hash.h"
 #include "help.h"
 #include "command-list.h"
 #include "string-list.h"
@@ -18,6 +20,8 @@
 #include "prompt.h"
 #include "fsmonitor-ipc.h"
 #include "repository.h"
+#include "alias.h"
+#include "utf8.h"
 
 #ifndef NO_CURL
 #include "git-curl-compat.h" /* For LIBCURL_VERSION only */
@@ -105,7 +109,7 @@ static void print_command_list(const struct cmdname_help *cmds,
 
 	for (i = 0; cmds[i].name; i++) {
 		if (cmds[i].category & mask) {
-			size_t len = strlen(cmds[i].name);
+			size_t len = utf8_strwidth(cmds[i].name);
 			printf("   %s   ", cmds[i].name);
 			if (longest > len)
 				mput_char(' ', longest - len);
@@ -212,7 +216,7 @@ void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
 		else if (cmp == 0) {
 			ei++;
 			free(cmds->names[ci++]);
-		} else if (cmp > 0)
+		} else
 			ei++;
 	}
 
@@ -330,7 +334,7 @@ static int get_colopts(const char *var, const char *value,
 void list_commands(struct cmdnames *main_cmds, struct cmdnames *other_cmds)
 {
 	unsigned int colopts = 0;
-	git_config(get_colopts, &colopts);
+	repo_config(the_repository, get_colopts, &colopts);
 
 	if (main_cmds->cnt) {
 		const char *exec_path = git_exec_path();
@@ -415,11 +419,10 @@ void list_cmds_by_config(struct string_list *list)
 {
 	const char *cmd_list;
 
-	if (git_config_get_string_tmp("completion.commands", &cmd_list))
+	if (repo_config_get_string_tmp(the_repository, "completion.commands", &cmd_list))
 		return;
 
-	string_list_sort(list);
-	string_list_remove_duplicates(list, 0);
+	string_list_sort_u(list, 1);
 
 	while (*cmd_list) {
 		struct strbuf sb = STRBUF_INIT;
@@ -467,20 +470,6 @@ void list_developer_interfaces_help(void)
 	putchar('\n');
 }
 
-static int get_alias(const char *var, const char *value,
-		     const struct config_context *ctx UNUSED, void *data)
-{
-	struct string_list *list = data;
-
-	if (skip_prefix(var, "alias.", &var)) {
-		if (!value)
-			return config_error_nonbool(var);
-		string_list_append(list, var)->util = xstrdup(value);
-	}
-
-	return 0;
-}
-
 static void list_all_cmds_help_external_commands(void)
 {
 	struct string_list others = STRING_LIST_INIT_DUP;
@@ -500,11 +489,11 @@ static void list_all_cmds_help_aliases(int longest)
 	struct cmdname_help *aliases;
 	int i;
 
-	git_config(get_alias, &alias_list);
+	list_aliases(&alias_list);
 	string_list_sort(&alias_list);
 
 	for (i = 0; i < alias_list.nr; i++) {
-		size_t len = strlen(alias_list.items[i].string);
+		size_t len = utf8_strwidth(alias_list.items[i].string);
 		if (longest < len)
 			longest = len;
 	}
@@ -552,35 +541,74 @@ struct help_unknown_cmd_config {
 	struct cmdnames aliases;
 };
 
+#define AUTOCORRECT_SHOW (-4)
 #define AUTOCORRECT_PROMPT (-3)
 #define AUTOCORRECT_NEVER (-2)
 #define AUTOCORRECT_IMMEDIATELY (-1)
+
+static int parse_autocorrect(const char *value)
+{
+	switch (git_parse_maybe_bool_text(value)) {
+		case 1:
+			return AUTOCORRECT_IMMEDIATELY;
+		case 0:
+			return AUTOCORRECT_SHOW;
+		default: /* other random text */
+			break;
+	}
+
+	if (!strcmp(value, "prompt"))
+		return AUTOCORRECT_PROMPT;
+	if (!strcmp(value, "never"))
+		return AUTOCORRECT_NEVER;
+	if (!strcmp(value, "immediate"))
+		return AUTOCORRECT_IMMEDIATELY;
+	if (!strcmp(value, "show"))
+		return AUTOCORRECT_SHOW;
+
+	return 0;
+}
 
 static int git_unknown_cmd_config(const char *var, const char *value,
 				  const struct config_context *ctx,
 				  void *cb)
 {
 	struct help_unknown_cmd_config *cfg = cb;
-	const char *p;
+	const char *subsection, *key;
+	size_t subsection_len;
 
 	if (!strcmp(var, "help.autocorrect")) {
-		if (!value)
-			return config_error_nonbool(var);
-		if (!strcmp(value, "never")) {
-			cfg->autocorrect = AUTOCORRECT_NEVER;
-		} else if (!strcmp(value, "immediate")) {
-			cfg->autocorrect = AUTOCORRECT_IMMEDIATELY;
-		} else if (!strcmp(value, "prompt")) {
-			cfg->autocorrect = AUTOCORRECT_PROMPT;
+		int v = parse_autocorrect(value);
+
+		if (!v) {
+			v = git_config_int(var, value, ctx->kvi);
+			if (v < 0 || v == 1)
+				v = AUTOCORRECT_IMMEDIATELY;
+		}
+
+		cfg->autocorrect = v;
+	}
+
+	/* Also use aliases for command lookup */
+	if (!parse_config_key(var, "alias", &subsection, &subsection_len,
+			      &key)) {
+		size_t key_len = strlen(key);
+
+		if (subsection) {
+			/* [alias "name"] command = value */
+			if (!strcmp(key, "command"))
+				add_cmdname(&cfg->aliases, subsection,
+					    subsection_len);
+			else {
+				key = var + strlen("alias.");
+				key_len = strlen(key);
+				add_cmdname(&cfg->aliases, key, key_len);
+			}
 		} else {
-			int v = git_config_int(var, value, ctx->kvi);
-			cfg->autocorrect = (v < 0)
-				? AUTOCORRECT_IMMEDIATELY : v;
+			/* alias.name = value */
+			add_cmdname(&cfg->aliases, key, key_len);
 		}
 	}
-	/* Also use aliases for command lookup */
-	if (skip_prefix(var, "alias.", &p))
-		add_cmdname(&cfg->aliases, p, strlen(p));
 
 	return 0;
 }
@@ -695,7 +723,8 @@ char *help_unknown_cmd(const char *cmd)
 		     n++)
 			; /* still counting */
 	}
-	if (cfg.autocorrect && n == 1 && SIMILAR_ENOUGH(best_similarity)) {
+	if (cfg.autocorrect && cfg.autocorrect != AUTOCORRECT_SHOW && n == 1 &&
+	    SIMILAR_ENOUGH(best_similarity)) {
 		char *assumed = xstrdup(main_cmds.names[0]->name);
 
 		fprintf_ln(stderr,
@@ -767,17 +796,37 @@ void get_version_info(struct strbuf *buf, int show_build_options)
 		strbuf_addf(buf, "shell-path: %s\n", SHELL_PATH);
 		/* NEEDSWORK: also save and output GIT-BUILD_OPTIONS? */
 
+#if defined WITH_RUST
+		strbuf_addstr(buf, "rust: enabled\n");
+#else
+		strbuf_addstr(buf, "rust: disabled\n");
+#endif
+
 		if (fsmonitor_ipc__is_supported())
 			strbuf_addstr(buf, "feature: fsmonitor--daemon\n");
+#if !defined NO_GETTEXT
+		strbuf_addstr(buf, "gettext: enabled\n");
+#endif
 #if defined LIBCURL_VERSION
 		strbuf_addf(buf, "libcurl: %s\n", LIBCURL_VERSION);
 #endif
 #if defined OPENSSL_VERSION_TEXT
 		strbuf_addf(buf, "OpenSSL: %s\n", OPENSSL_VERSION_TEXT);
 #endif
-#if defined ZLIB_VERSION
+#if defined ZLIBNG_VERSION
+		strbuf_addf(buf, "zlib-ng: %s\n", ZLIBNG_VERSION);
+#elif defined ZLIB_VERSION
 		strbuf_addf(buf, "zlib: %s\n", ZLIB_VERSION);
 #endif
+		strbuf_addf(buf, "SHA-1: %s\n", SHA1_BACKEND);
+#if defined SHA1_UNSAFE_BACKEND
+		strbuf_addf(buf, "non-collision-detecting-SHA-1: %s\n",
+			    SHA1_UNSAFE_BACKEND);
+#endif
+		strbuf_addf(buf, "SHA-256: %s\n", SHA256_BACKEND);
+		strbuf_addf(buf, "default-ref-format: %s\n",
+			    ref_storage_format_to_name(REF_STORAGE_FORMAT_DEFAULT));
+		strbuf_addf(buf, "default-hash: %s\n", hash_algos[GIT_HASH_DEFAULT].name);
 	}
 }
 
@@ -810,18 +859,16 @@ struct similar_ref_cb {
 	struct string_list *similar_refs;
 };
 
-static int append_similar_ref(const char *refname, const char *referent UNUSED,
-			      const struct object_id *oid UNUSED,
-			      int flags UNUSED, void *cb_data)
+static int append_similar_ref(const struct reference *ref, void *cb_data)
 {
 	struct similar_ref_cb *cb = (struct similar_ref_cb *)(cb_data);
-	char *branch = strrchr(refname, '/') + 1;
+	const char *branch = strrchr(ref->name, '/') + 1;
 
 	/* A remote branch of the same name is deemed similar */
-	if (starts_with(refname, "refs/remotes/") &&
+	if (starts_with(ref->name, "refs/remotes/") &&
 	    !strcmp(branch, cb->base_ref))
 		string_list_append_nodup(cb->similar_refs,
-					 refs_shorten_unambiguous_ref(get_main_ref_store(the_repository), refname, 1));
+					 refs_shorten_unambiguous_ref(get_main_ref_store(the_repository), ref->name, 1));
 	return 0;
 }
 

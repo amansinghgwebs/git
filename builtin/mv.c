@@ -15,12 +15,14 @@
 #include "gettext.h"
 #include "name-hash.h"
 #include "object-file.h"
+#include "path.h"
 #include "pathspec.h"
 #include "lockfile.h"
 #include "dir.h"
 #include "string-list.h"
 #include "parse-options.h"
 #include "read-cache-ll.h"
+#include "symlinks.h"
 
 #include "setup.h"
 #include "strvec.h"
@@ -28,7 +30,8 @@
 #include "entry.h"
 
 static const char * const builtin_mv_usage[] = {
-	N_("git mv [<options>] <source>... <destination>"),
+	N_("git mv [-v] [-f] [-n] [-k] <source> <destination>"),
+	N_("git mv [-v] [-f] [-n] [-k] <source>... <destination-directory>"),
 	NULL
 };
 
@@ -37,7 +40,20 @@ enum update_mode {
 	INDEX = (1 << 2),
 	SPARSE = (1 << 3),
 	SKIP_WORKTREE_DIR = (1 << 4),
+	/*
+	 * A file gets moved implicitly via a move of one of its parent
+	 * directories. This flag causes us to skip the check that we don't try
+	 * to move a file and any of its parent directories at the same point
+	 * in time.
+	 */
+	MOVE_VIA_PARENT_DIR = (1 << 5),
 };
+
+static int needs_worktree_rename(enum update_mode mode, enum update_mode dst_mode)
+{
+	return !(mode & (INDEX | SPARSE | SKIP_WORKTREE_DIR)) &&
+	       !(dst_mode & (SKIP_WORKTREE_DIR | SPARSE));
+}
 
 #define DUP_BASENAME 1
 #define KEEP_TRAILING_SLASH 2
@@ -62,7 +78,7 @@ static void internal_prefix_pathspec(struct strvec *out,
 
 		trimmed = xmemdupz(pathspec[i], to_copy);
 		maybe_basename = (flags & DUP_BASENAME) ? basename(trimmed) : trimmed;
-		prefixed_path = prefix_path(prefix, prefixlen, maybe_basename);
+		prefixed_path = prefix_path(the_repository, prefix, prefixlen, maybe_basename);
 		strvec_push(out, prefixed_path);
 
 		free(prefixed_path);
@@ -181,6 +197,21 @@ static void remove_empty_src_dirs(const char **src_dir, size_t src_dir_nr)
 	strbuf_release(&a_src_dir);
 }
 
+struct pathmap_entry {
+	struct hashmap_entry ent;
+	const char *path;
+};
+
+static int pathmap_cmp(const void *cmp_data UNUSED,
+		       const struct hashmap_entry *a,
+		       const struct hashmap_entry *b,
+		       const void *key UNUSED)
+{
+	const struct pathmap_entry *e1 = container_of(a, struct pathmap_entry, ent);
+	const struct pathmap_entry *e2 = container_of(b, struct pathmap_entry, ent);
+	return fspathcmp(e1->path, e2->path);
+}
+
 int cmd_mv(int argc,
 	   const char **argv,
 	   const char *prefix,
@@ -211,9 +242,12 @@ int cmd_mv(int argc,
 	struct cache_entry *ce;
 	struct string_list only_match_skip_worktree = STRING_LIST_INIT_DUP;
 	struct string_list dirty_paths = STRING_LIST_INIT_DUP;
+	struct hashmap moved_dirs = HASHMAP_INIT(pathmap_cmp, NULL);
+	struct strbuf pathbuf = STRBUF_INIT;
 	int ret;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 
 	argc = parse_options(argc, argv, prefix, builtin_mv_options,
 			     builtin_mv_usage, 0);
@@ -329,6 +363,7 @@ int cmd_mv(int argc,
 
 dir_check:
 		if (S_ISDIR(st.st_mode)) {
+			struct pathmap_entry *entry;
 			char *dst_with_slash;
 			size_t dst_with_slash_len;
 			int j, n;
@@ -346,6 +381,11 @@ dir_check:
 				goto act_on_entry;
 			}
 
+			entry = xmalloc(sizeof(*entry));
+			entry->path = src;
+			hashmap_entry_init(&entry->ent, fspathhash(src));
+			hashmap_add(&moved_dirs, &entry->ent);
+
 			/* last - first >= 1 */
 			modes[i] |= WORKING_DIRECTORY;
 
@@ -361,13 +401,13 @@ dir_check:
 			for (j = 0; j < last - first; j++) {
 				const struct cache_entry *ce = the_repository->index->cache[first + j];
 				const char *path = ce->name;
-				char *prefixed_path = prefix_path(dst_with_slash, dst_with_slash_len, path + length + 1);
+				char *prefixed_path = prefix_path(the_repository, dst_with_slash,
+								  dst_with_slash_len, path + length + 1);
 
 				strvec_push(&sources, path);
 				strvec_push(&destinations, prefixed_path);
 
-				memset(modes + argc + j, 0, sizeof(enum update_mode));
-				modes[argc + j] |= ce_skip_worktree(ce) ? SPARSE : INDEX;
+				modes[argc + j] = MOVE_VIA_PARENT_DIR | (ce_skip_worktree(ce) ? SPARSE : INDEX);
 				submodule_gitfiles[argc + j] = NULL;
 
 				free(prefixed_path);
@@ -386,7 +426,7 @@ dir_check:
 			goto act_on_entry;
 		}
 		if (lstat(dst, &st) == 0 &&
-		    (!ignore_case || strcasecmp(src, dst))) {
+		    (!repo_ignore_case(the_repository) || strcasecmp(src, dst))) {
 			bad = _("destination exists");
 			if (force) {
 				/*
@@ -409,6 +449,41 @@ dir_check:
 		if (is_dir_sep(dst[strlen(dst) - 1])) {
 			bad = _("destination directory does not exist");
 			goto act_on_entry;
+		}
+		if (has_symlink_leading_path(dst, strlen(dst))) {
+			bad = _("destination is beyond a symbolic link");
+			goto act_on_entry;
+		}
+
+		/*
+		 * If we are going to move SRC to DST on disk, DST's leading
+		 * directories must already exist.
+		 */
+		if (needs_worktree_rename(modes[i], dst_mode)) {
+			const char *slash_ = strrchr(dst, '/');
+
+			if (slash_) {
+				struct stat dir_st;
+				char *dst_dir = xstrdup(dst);
+				char *slash = &dst_dir[slash_ - dst];
+
+				*slash = '\0';
+				if (lstat(dst_dir, &dir_st) < 0) {
+					/*
+					 * other errors fall through to rename(),
+					 * which reports them
+					 */
+					if (errno == ENOENT || errno == ENOTDIR)
+						bad = _("destination directory does not exist");
+				} else if (!S_ISDIR(dir_st.st_mode)) {
+					bad = _("destination is not a directory");
+				}
+
+				free(dst_dir);
+			}
+
+			if (bad)
+				goto act_on_entry;
 		}
 
 		if (ignore_sparse &&
@@ -463,6 +538,32 @@ remove_entry:
 		}
 	}
 
+	for (i = 0; i < argc; i++) {
+		const char *slash_pos;
+
+		if (modes[i] & MOVE_VIA_PARENT_DIR)
+			continue;
+
+		strbuf_reset(&pathbuf);
+		strbuf_addstr(&pathbuf, sources.v[i]);
+
+		slash_pos = strrchr(pathbuf.buf, '/');
+		while (slash_pos > pathbuf.buf) {
+			struct pathmap_entry needle;
+
+			strbuf_setlen(&pathbuf, slash_pos - pathbuf.buf);
+
+			needle.path = pathbuf.buf;
+			hashmap_entry_init(&needle.ent, fspathhash(pathbuf.buf));
+
+			if (hashmap_get_entry(&moved_dirs, &needle, ent, NULL))
+				die(_("cannot move both '%s' and its parent directory '%s'"),
+				    sources.v[i], pathbuf.buf);
+
+			slash_pos = strrchr(pathbuf.buf, '/');
+		}
+	}
+
 	if (only_match_skip_worktree.nr) {
 		advise_on_updating_sparse_paths(&only_match_skip_worktree);
 		if (!ignore_errors) {
@@ -485,12 +586,11 @@ remove_entry:
 			printf(_("Renaming %s to %s\n"), src, dst);
 		if (show_only)
 			continue;
-		if (!(mode & (INDEX | SPARSE | SKIP_WORKTREE_DIR)) &&
-		    !(dst_mode & (SKIP_WORKTREE_DIR | SPARSE)) &&
+		if (needs_worktree_rename(mode, dst_mode) &&
 		    rename(src, dst) < 0) {
 			if (ignore_errors)
 				continue;
-			die_errno(_("renaming '%s' failed"), src);
+			die_errno(_("renaming '%s' to '%s' failed"), src, dst);
 		}
 		if (submodule_gitfiles[i]) {
 			if (!update_path_in_gitmodules(src, dst))
@@ -505,7 +605,8 @@ remove_entry:
 			continue;
 
 		pos = index_name_pos(the_repository->index, src, strlen(src));
-		assert(pos >= 0);
+		if (pos < 0)
+			BUG("could not find source in index: '%s'", src);
 		if (!(mode & SPARSE) && !lstat(src, &st))
 			sparse_and_dirty = ie_modified(the_repository->index,
 						       the_repository->index->cache[pos],
@@ -514,8 +615,8 @@ remove_entry:
 		rename_index_entry_at(the_repository->index, pos, dst);
 
 		if (ignore_sparse &&
-		    core_apply_sparse_checkout &&
-		    core_sparse_checkout_cone) {
+		    cfg->apply_sparse_checkout &&
+		    cfg->core_sparse_checkout_cone) {
 			/*
 			 * NEEDSWORK: we are *not* paying attention to
 			 * "out-to-out" move (<source> is out-of-cone and
@@ -555,7 +656,7 @@ remove_entry:
 					 */
 					char *dst_dup = xstrdup(dst);
 					string_list_append(&dirty_paths, dst);
-					safe_create_leading_directories(dst_dup);
+					safe_create_leading_directories(the_repository, dst_dup);
 					FREE_AND_NULL(dst_dup);
 					rename(src, dst);
 				}
@@ -587,6 +688,8 @@ out:
 	strvec_clear(&dest_paths);
 	strvec_clear(&destinations);
 	strvec_clear(&submodule_gitfiles_to_free);
+	hashmap_clear_and_free(&moved_dirs, struct pathmap_entry, ent);
+	strbuf_release(&pathbuf);
 	free(submodule_gitfiles);
 	free(modes);
 	return ret;

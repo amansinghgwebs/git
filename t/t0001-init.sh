@@ -278,9 +278,9 @@ test_expect_success POSIXPERM 'init creates a new deep directory (umask vs. shar
 		git init --bare --shared=0660 newdir/a/b/c &&
 		test_path_is_dir newdir/a/b/c/refs &&
 		ls -ld newdir/a newdir/a/b > lsab.out &&
-		! grep -v "^drwxrw[sx]r-x" lsab.out &&
+		test_grep ! -v "^drwxrw[sx]r-x" lsab.out &&
 		ls -ld newdir/a/b/c > lsc.out &&
-		! grep -v "^drwxrw[sx]---" lsc.out
+		test_grep ! -v "^drwxrw[sx]---" lsc.out
 	)
 '
 
@@ -425,7 +425,11 @@ test_expect_success SYMLINKS 're-init to move gitdir symlink' '
 	git init --separate-git-dir ../realgitdir
 	) &&
 	echo "gitdir: $(pwd)/realgitdir" >expected &&
-	test_cmp expected newdir/.git &&
+	case "$GIT_TEST_CMP" in
+	# `git diff --no-index` does not resolve symlinks
+	*--no-index*) cmp expected newdir/.git;;
+	*) test_cmp expected newdir/.git;;
+	esac &&
 	test_cmp expected newdir/here &&
 	test_path_is_dir realgitdir/refs
 '
@@ -586,6 +590,18 @@ test_expect_success 'GIT_DEFAULT_HASH overrides init.defaultObjectFormat' '
 	echo sha256 >expected
 '
 
+for hash in sha1 sha256
+do
+	test_expect_success "reinit repository with GIT_DEFAULT_HASH=$hash does not change format" '
+		test_when_finished "rm -rf repo" &&
+		git init repo &&
+		git -C repo rev-parse --show-object-format >expect &&
+		GIT_DEFAULT_HASH=$hash git init repo &&
+		git -C repo rev-parse --show-object-format >actual &&
+		test_cmp expect actual
+	'
+done
+
 test_expect_success 'extensions.objectFormat is not allowed with repo version 0' '
 	test_when_finished "rm -rf explicit-v0" &&
 	git init --object-format=sha256 explicit-v0 &&
@@ -603,7 +619,7 @@ test_expect_success DEFAULT_REPO_FORMAT 'extensions.refStorage is not allowed wi
 	git init refstorage &&
 	git -C refstorage config extensions.refStorage files &&
 	test_must_fail git -C refstorage rev-parse 2>err &&
-	grep "repo version is 0, but v1-only extension found" err
+	test_grep "repo version is 0, but v1-only extension found" err
 '
 
 test_expect_success DEFAULT_REPO_FORMAT 'extensions.refStorage with files backend' '
@@ -621,7 +637,7 @@ test_expect_success DEFAULT_REPO_FORMAT 'extensions.refStorage with unknown back
 	git -C refstorage config core.repositoryformatversion 1 &&
 	git -C refstorage config extensions.refStorage garbage &&
 	test_must_fail git -C refstorage rev-parse 2>err &&
-	grep "invalid value for ${SQ}extensions.refstorage${SQ}: ${SQ}garbage${SQ}" err
+	test_grep "invalid value for ${SQ}extensions.refstorage${SQ}: ${SQ}garbage${SQ}" err
 '
 
 test_expect_success 'init with GIT_DEFAULT_REF_FORMAT=garbage' '
@@ -644,6 +660,17 @@ test_expect_success 'init warns about invalid init.defaultRefFormat' '
 	git -C repo rev-parse --show-ref-format >actual &&
 	echo $GIT_DEFAULT_REF_FORMAT >expected &&
 	test_cmp expected actual
+'
+
+test_expect_success 'default ref format' '
+	test_when_finished "rm -rf refformat" &&
+	(
+		sane_unset GIT_DEFAULT_REF_FORMAT &&
+		git init refformat
+	) &&
+	git version --build-options | sed -ne "s/^default-ref-format: //p" >expect &&
+	git -C refformat rev-parse --show-ref-format >actual &&
+	test_cmp expect actual
 '
 
 backends="files reftable"
@@ -697,6 +724,15 @@ do
 		git -C refformat rev-parse --show-ref-format >actual &&
 		test_cmp expect actual
 	'
+
+	test_expect_success "reinit repository with GIT_DEFAULT_REF_FORMAT=$format does not change format" '
+		test_when_finished "rm -rf refformat" &&
+		git init refformat &&
+		git -C refformat rev-parse --show-ref-format >expect &&
+		GIT_DEFAULT_REF_FORMAT=$format git init refformat &&
+		git -C refformat rev-parse --show-ref-format >actual &&
+		test_cmp expect actual
+	'
 done
 
 test_expect_success "--ref-format= overrides GIT_DEFAULT_REF_FORMAT" '
@@ -713,6 +749,40 @@ test_expect_success "GIT_DEFAULT_REF_FORMAT= overrides init.defaultRefFormat" '
 
 	GIT_DEFAULT_REF_FORMAT=reftable git init refformat &&
 	echo reftable >expect &&
+	git -C refformat rev-parse --show-ref-format >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "init with feature.experimental=true" '
+	test_when_finished "rm -rf refformat" &&
+	test_config_global feature.experimental true &&
+	(
+		sane_unset GIT_DEFAULT_REF_FORMAT &&
+		git init refformat
+	) &&
+	echo reftable >expect &&
+	git -C refformat rev-parse --show-ref-format >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "init.defaultRefFormat overrides feature.experimental=true" '
+	test_when_finished "rm -rf refformat" &&
+	test_config_global feature.experimental true &&
+	test_config_global init.defaultRefFormat files &&
+	(
+		sane_unset GIT_DEFAULT_REF_FORMAT &&
+		git init refformat
+	) &&
+	echo files >expect &&
+	git -C refformat rev-parse --show-ref-format >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "GIT_DEFAULT_REF_FORMAT= overrides feature.experimental=true" '
+	test_when_finished "rm -rf refformat" &&
+	test_config_global feature.experimental true &&
+	GIT_DEFAULT_REF_FORMAT=files git init refformat &&
+	echo files >expect &&
 	git -C refformat rev-parse --show-ref-format >actual &&
 	test_cmp expect actual
 '
@@ -778,8 +848,8 @@ test_expect_success MINGW 'redirect std handles' '
 		GIT_REDIRECT_STDOUT=output.txt \
 		GIT_REDIRECT_STDERR="2>&1" \
 		git rev-parse --git-dir --verify refs/invalid &&
-	grep "^\\.git\$" output.txt &&
-	grep "Needed a single revision" output.txt
+	test_grep "^\\.git\$" output.txt &&
+	test_grep "Needed a single revision" output.txt
 '
 
 test_expect_success '--initial-branch' '
@@ -792,14 +862,14 @@ test_expect_success '--initial-branch' '
 	git init --initial-branch=ignore initial-branch-option 2>err &&
 	test_grep "ignored --initial-branch" err &&
 	git -C initial-branch-option symbolic-ref HEAD >actual &&
-	grep hello actual
+	test_grep hello actual
 '
 
 test_expect_success 'overridden default initial branch name (config)' '
 	test_config_global init.defaultBranch nmb &&
 	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME= git init initial-branch-config &&
 	git -C initial-branch-config symbolic-ref HEAD >actual &&
-	grep nmb actual
+	test_grep nmb actual
 '
 
 test_expect_success 'advice on unconfigured init.defaultBranch' '
@@ -809,11 +879,35 @@ test_expect_success 'advice on unconfigured init.defaultBranch' '
 	test_grep "<YELLOW>hint: " decoded
 '
 
+test_expect_success 'advice on unconfigured init.defaultBranch disabled' '
+	test_when_finished "rm -rf no-advice" &&
+
+	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME= \
+		git -c advice.defaultBranchName=false init no-advice 2>err &&
+	test_grep ! "hint: " err
+'
+
+test_expect_success 'default branch name' '
+	if test_have_prereq WITH_BREAKING_CHANGES
+	then
+		expect=main
+	else
+		expect=master
+	fi &&
+	echo "refs/heads/$expect" >expect &&
+	(
+		sane_unset GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME &&
+		git init default-initial-branch-name
+	) &&
+	git -C default-initial-branch-name symbolic-ref HEAD >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'overridden default main branch name (env)' '
 	test_config_global init.defaultBranch nmb &&
 	GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=env git init main-branch-env &&
 	git -C main-branch-env symbolic-ref HEAD >actual &&
-	grep env actual
+	test_grep env actual
 '
 
 test_expect_success 'invalid default branch name' '
@@ -861,15 +955,6 @@ test_expect_success 're-init with includeIf.onbranch condition' '
 	test_cmp expect actual
 '
 
-test_expect_success 're-init with includeIf.onbranch condition' '
-	test_when_finished "rm -rf repo" &&
-	git init repo &&
-	git -c includeIf.onbranch:nonexistent.path=/does/not/exist init repo &&
-	echo $GIT_DEFAULT_REF_FORMAT >expect &&
-	git -C repo rev-parse --show-ref-format >actual &&
-	test_cmp expect actual
-'
-
 test_expect_success 're-init skips non-matching includeIf.onbranch' '
 	test_when_finished "rm -rf repo config" &&
 	cat >config <<-EOF &&
@@ -893,6 +978,16 @@ test_expect_success 're-init reads matching includeIf.onbranch' '
 	EOF
 	test_must_fail git -c includeIf.onbranch:branch.path="$path" init repo 2>err &&
 	test_cmp expect err
+'
+
+test_expect_success 'init honors GIT_OBJECT_DIRECTORY' '
+	test_when_finished "rm -rf init-objdir custom-odb" &&
+	mkdir custom-odb &&
+	env GIT_OBJECT_DIRECTORY="$(pwd)/custom-odb" \
+		git init init-objdir &&
+	test_path_is_missing init-objdir/.git/objects/pack &&
+	test_path_is_dir custom-odb/pack &&
+	test_path_is_dir custom-odb/info
 '
 
 test_done

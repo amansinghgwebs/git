@@ -3,6 +3,7 @@
 #include "builtin.h"
 #include "config.h"
 #include "diff.h"
+#include "environment.h"
 #include "gettext.h"
 #include "hash.h"
 #include "hex.h"
@@ -70,9 +71,9 @@ static size_t get_one_patchid(struct object_id *next_oid, struct object_id *resu
 	int before = -1, after = -1;
 	int diff_is_binary = 0;
 	char pre_oid_str[GIT_MAX_HEXSZ + 1], post_oid_str[GIT_MAX_HEXSZ + 1];
-	git_hash_ctx ctx;
+	struct git_hash_ctx ctx;
 
-	the_hash_algo->init_fn(&ctx);
+	git_hash_init(&ctx, the_hash_algo);
 	oidclr(result, the_repository->hash_algo);
 
 	while (strbuf_getwholeline(line_buf, stdin, '\n') != EOF) {
@@ -85,7 +86,7 @@ static size_t get_one_patchid(struct object_id *next_oid, struct object_id *resu
 		    !skip_prefix(line, "From ", &p) &&
 		    starts_with(line, "\\ ") && 12 < strlen(line)) {
 			if (verbatim)
-				the_hash_algo->update_fn(&ctx, line, strlen(line));
+				git_hash_update(&ctx, line, strlen(line));
 			continue;
 		}
 
@@ -104,10 +105,10 @@ static size_t get_one_patchid(struct object_id *next_oid, struct object_id *resu
 			    starts_with(line, "Binary files")) {
 				diff_is_binary = 1;
 				before = 0;
-				the_hash_algo->update_fn(&ctx, pre_oid_str,
-							 strlen(pre_oid_str));
-				the_hash_algo->update_fn(&ctx, post_oid_str,
-							 strlen(post_oid_str));
+				git_hash_update(&ctx, pre_oid_str,
+						strlen(pre_oid_str));
+				git_hash_update(&ctx, post_oid_str,
+						strlen(post_oid_str));
 				if (stable)
 					flush_one_hunk(result, &ctx);
 				continue;
@@ -165,13 +166,14 @@ static size_t get_one_patchid(struct object_id *next_oid, struct object_id *resu
 		/* Add line to hash algo (possibly removing whitespace) */
 		len = verbatim ? strlen(line) : remove_space(line);
 		patchlen += len;
-		the_hash_algo->update_fn(&ctx, line, len);
+		git_hash_update(&ctx, line, len);
 	}
 
 	if (!found_next)
 		oidclr(next_oid, the_repository->hash_algo);
 
 	flush_one_hunk(result, &ctx);
+	git_hash_discard(&ctx);
 
 	return patchlen;
 }
@@ -227,15 +229,15 @@ int cmd_patch_id(int argc,
 	int opts = 0;
 	struct option builtin_patch_id_options[] = {
 		OPT_CMDMODE(0, "unstable", &opts,
-		    N_("use the unstable patch-id algorithm"), 1),
+		    N_("use the unstable patch ID algorithm"), 1),
 		OPT_CMDMODE(0, "stable", &opts,
-		    N_("use the stable patch-id algorithm"), 2),
+		    N_("use the stable patch ID algorithm"), 2),
 		OPT_CMDMODE(0, "verbatim", &opts,
 			N_("don't strip whitespace from the patch"), 3),
 		OPT_END()
 	};
 
-	git_config(git_patch_id_config, &config);
+	repo_config(the_repository, git_patch_id_config, &config);
 
 	/* verbatim implies stable */
 	if (config.verbatim)
@@ -254,7 +256,7 @@ int cmd_patch_id(int argc,
 	 * the code that computes patch IDs to always use SHA1.
 	 */
 	if (!the_hash_algo)
-		repo_set_hash_algo(the_repository, GIT_HASH_SHA1);
+		repo_set_hash_algo(the_repository, GIT_HASH_DEFAULT);
 
 	generate_id_list(opts ? opts > 1 : config.stable,
 			 opts ? opts == 3 : config.verbatim);

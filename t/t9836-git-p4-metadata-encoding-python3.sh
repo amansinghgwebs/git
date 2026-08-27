@@ -12,23 +12,25 @@ failing, and produces maximally sane output in git.'
 ## SECTION REPEATED IN t9835 ##
 ###############################
 
+EXTRA_PATH="$(pwd)/temp_python"
+mkdir "$EXTRA_PATH"
+PATH="$EXTRA_PATH:$PATH"
+export PATH
+
 # These tests are specific to Python 3. Write a custom script that executes
 # git-p4 directly with the Python 3 interpreter to ensure that we use that
 # version even if Git was compiled with Python 2.
-python_target_binary=$(which python3)
-if test -n "$python_target_binary"
-then
-	mkdir temp_python
-	PATH="$(pwd)/temp_python:$PATH"
-	export PATH
-
-	write_script temp_python/git-p4-python3 <<-EOF
+test_lazy_prereq P4_PYTHON3 '
+	python_target_binary=$(which python3) &&
+	test -n "$python_target_binary" &&
+	write_script "$EXTRA_PATH"/git-p4-python3 <<-EOF &&
 	exec "$python_target_binary" "$(git --exec-path)/git-p4" "\$@"
 	EOF
-fi
+	( git p4-python3 || true ) >err &&
+	test_grep "valid commands" err
+'
 
-git p4-python3 >err
-if ! grep 'valid commands' err
+if ! test_have_prereq P4_PYTHON3
 then
 	skip_all="skipping python3 git p4 tests; python3 not available"
 	test_done
@@ -82,7 +84,7 @@ test_expect_success 'clone non-utf8 repo with strict encoding' '
 	test_when_finished cleanup_git &&
 	test_when_finished remove_user_cache &&
 	test_must_fail git -c git-p4.metadataDecodingStrategy=strict p4-python3 clone --dest="$git" //depot@all 2>err &&
-	grep "Decoding perforce metadata failed!" err
+	test_grep "Decoding perforce metadata failed!" err
 '
 
 test_expect_success 'check utf-8 contents with passthrough strategy' '
@@ -92,8 +94,8 @@ test_expect_success 'check utf-8 contents with passthrough strategy' '
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "some utf-8 tǣxt" actual &&
-		grep "ǣuthor" actual
+		test_grep "some utf-8 tǣxt" actual &&
+		test_grep "ǣuthor" actual
 	)
 '
 
@@ -105,9 +107,9 @@ test_expect_success 'check latin-1 contents corrupted in git with passthrough st
 		cd "$git" &&
 		git log >actual &&
 		badly_encoded_in_git=$(echo "some latin-1 tæxt" | iconv -f utf8 -t latin1) &&
-		grep "$badly_encoded_in_git" actual &&
+		test_grep "$badly_encoded_in_git" actual &&
 		bad_author_in_git="$(echo æuthor | iconv -f utf8 -t latin1)" &&
-		grep "$bad_author_in_git" actual
+		test_grep "$bad_author_in_git" actual
 	)
 '
 
@@ -118,8 +120,8 @@ test_expect_success 'check utf-8 contents with fallback strategy' '
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "some utf-8 tǣxt" actual &&
-		grep "ǣuthor" actual
+		test_grep "some utf-8 tǣxt" actual &&
+		test_grep "ǣuthor" actual
 	)
 '
 
@@ -130,8 +132,8 @@ test_expect_success 'check latin-1 contents with fallback strategy' '
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "some latin-1 tæxt" actual &&
-		grep "æuthor" actual
+		test_grep "some latin-1 tæxt" actual &&
+		test_grep "æuthor" actual
 	)
 '
 
@@ -142,8 +144,8 @@ test_expect_success 'check cp-1252 contents with fallback strategy' '
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "sœme cp-1252 tæxt" actual &&
-		grep "æuthœr" actual
+		test_grep "sœme cp-1252 tæxt" actual &&
+		test_grep "æuthœr" actual
 	)
 '
 
@@ -154,8 +156,8 @@ test_expect_success 'check cp850 contents parsed with correct fallback' '
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "hÅs some cp850 text" actual &&
-		grep "Åuthor" actual
+		test_grep "hÅs some cp850 text" actual &&
+		test_grep "Åuthor" actual
 	)
 '
 
@@ -166,8 +168,8 @@ test_expect_success 'check cp850-only contents escaped when cp1252 is fallback' 
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "h%8Fs some cp850 text" actual &&
-		grep "%8Futhor" actual
+		test_grep "h%8Fs some cp850 text" actual &&
+		test_grep "%8Futhor" actual
 	)
 '
 
@@ -189,8 +191,8 @@ test_expect_success 'check cp-1252 contents on later sync after clone with fallb
 		git p4-python3 sync --branch=master &&
 
 		git log p4/master >actual &&
-		grep "sœme more cp-1252 tæxt" actual &&
-		grep "æuthœr" actual
+		test_grep "sœme more cp-1252 tæxt" actual &&
+		test_grep "æuthœr" actual
 	)
 '
 
@@ -206,8 +208,8 @@ test_expect_success 'fallback (both utf-8 and cp-1252 contents handled) is the d
 	(
 		cd "$git" &&
 		git log >actual &&
-		grep "sœme cp-1252 tæxt" actual &&
-		grep "æuthœr" actual
+		test_grep "sœme cp-1252 tæxt" actual &&
+		test_grep "æuthœr" actual
 	)
 '
 

@@ -1,7 +1,9 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "test-tool.h"
 #include "hex.h"
 #include "repository.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "setup.h"
 
 /*
@@ -15,7 +17,7 @@ static void object_info(const char *gitdir, const char *oid_hex)
 {
 	struct repository r;
 	struct object_id oid;
-	unsigned long size;
+	size_t size;
 	struct object_info oi = {.sizep = &size};
 	const char *p;
 
@@ -23,7 +25,7 @@ static void object_info(const char *gitdir, const char *oid_hex)
 		die("could not init repo");
 	if (parse_oid_hex_algop(oid_hex, &oid, &p, r.hash_algo))
 		die("could not parse oid");
-	if (oid_object_info_extended(&r, &oid, &oi, 0))
+	if (odb_read_object_info_extended(r.objects, &oid, &oi, 0))
 		die("could not obtain object info");
 	printf("%d\n", (int) size);
 
@@ -32,7 +34,7 @@ static void object_info(const char *gitdir, const char *oid_hex)
 
 int cmd__partial_clone(int argc, const char **argv)
 {
-	setup_git_directory();
+	setup_git_directory(the_repository);
 
 	if (argc < 4)
 		die("too few arguments");

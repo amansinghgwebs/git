@@ -415,6 +415,10 @@ GIT_TEST_PACK_SPARSE=<boolean> if disabled will default the pack-objects
 builtin to use the non-sparse object walk. This can still be overridden by
 the --sparse command-line argument.
 
+GIT_TEST_PACK_PATH_WALK=<boolean> if enabled will default the pack-objects
+builtin to use the path-walk API for the object walk. This can still be
+overridden by the --no-path-walk command-line argument.
+
 GIT_TEST_PRELOAD_INDEX=<boolean> exercises the preload-index code path
 by overriding the minimum number of cache entries required per thread.
 
@@ -470,6 +474,10 @@ prereqs that are required to succeed. If a prereq in this list is triggered by
 a test and then fails then the whole test run will abort. This can help to make
 sure the expected tests are executed and not silently skipped when their
 dependency breaks or is simply not present in a new environment.
+
+GIT_TEST_NAME_HASH_VERSION=<int>, when set, causes 'git pack-objects' to
+assume '--name-hash-version=<n>'.
+
 
 Naming Tests
 ------------
@@ -814,7 +822,7 @@ Skipping tests
 --------------
 
 If you need to skip tests you should do so by using the three-arg form
-of the test_* functions (see the "Test harness library" section
+of the test_expect_* functions (see the "Test harness library" section
 below), e.g.:
 
     test_expect_success PERL 'I need Perl' '
@@ -937,6 +945,17 @@ see test-lib-functions.sh for the full list and their options.
    Merges the given rev using the given message.  Like test_commit,
    creates a tag and calls test_tick before committing.
 
+ - commit_body <rev>
+
+   Print the message body of <rev>, i.e. the contents of its commit
+   object with the header removed.  Use this instead of piping
+   "git cat-file commit" into "sed", which would hide a failure of
+   the git command.
+
+   Example:
+
+	commit_body HEAD >actual
+
  - test_set_prereq <prereq>
 
    Set a test prerequisite to be used later with test_have_prereq. The
@@ -960,6 +979,29 @@ see test-lib-functions.sh for the full list and their options.
 	    skip_all='skipping perl interface tests, perl not available'
 	    test_done
 	fi
+
+ - test_lazy_prereq <prereq> <script>
+
+   Declare the way to determine if a test prerequisite <prereq> is
+   satisfied or not, but delay the actual determination until the
+   prerequisite is actually used by "test_have_prereq" or the
+   three-arg form of the test_expect_* functions.  For example, this
+   is how the SYMLINKS prerequisite is declared to see if the platform
+   supports symbolic links:
+
+	test_lazy_prereq SYMLINKS '
+		ln -s x y && test -h y
+	'
+
+   The script is lazily invoked when SYMLINKS prerequisite is first
+   queried by either "test_have_prereq SYMLINKS" or "test_expect_*
+   SYMLINKS ...".  The script is run in a temporary directory inside
+   a subshell, so you do not have to worry about removing temporary
+   files you create there.  When the script exits with status 0, the
+   prerequisite is set.  Exiting with non-zero status other than 125
+   makes the prerequisite unsatisified.  Exiting the script with 125
+   signals a programming error and is used to mark a prerequisite that
+   should not be used by test scripts.
 
  - test_expect_code <exit-code> <command>
 
@@ -1007,6 +1049,40 @@ see test-lib-functions.sh for the full list and their options.
  - test_line_count (= | -lt | -ge | ...) <length> <file>
 
    Check whether a file has the length it is expected to.
+
+ - test_grep [!] [<grep-options>] <pattern> <file>
+
+   Check whether <file> contains a line matching <pattern>, or
+   with '!' that no line matches.  Use this instead of bare
+   'grep <pattern> <file>' in test assertions.  On failure,
+   test_grep prints the contents of <file> for easier debugging,
+   whereas a bare 'grep' would fail silently.
+
+   For negation, pass '!' as the first argument:
+
+	test_grep ! "^diff --git" actual
+
+   Do not negate by writing '! test_grep', as that suppresses the
+   diagnostic output.
+
+   test_grep should only be used as a test assertion.  When grep
+   is used as a data filter (e.g. 'grep -v "^index" actual >filtered')
+   or inside a command substitution (e.g. '$(grep -c ...)'), plain
+   'grep' is the right choice because the exit code is not the
+   assertion itself.
+
+   test_grep requires <file> to exist and will BUG otherwise, so
+   use it only where the file is guaranteed to exist at that point.
+   When a file's presence is conditional (a backend-specific file,
+   or a path that only exists on some platforms, such as an NTFS
+   8.3 short name), guard the assertion on that condition (a
+   prerequisite, or a 'test -e' on the path) and use test_grep
+   inside the guard:
+
+	if test_have_prereq REFFILES
+	then
+		test_grep ! "$refname" .git/packed-refs
+	fi
 
  - test_path_is_file <path>
    test_path_is_dir <path>

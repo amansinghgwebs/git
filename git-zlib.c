@@ -30,36 +30,56 @@ static const char *zerr_to_string(int status)
  */
 /* #define ZLIB_BUF_MAX ((uInt)-1) */
 #define ZLIB_BUF_MAX ((uInt) 1024 * 1024 * 1024) /* 1GB */
-static inline uInt zlib_buf_cap(unsigned long len)
+
+/* uLong is 32-bit on Windows, even on 64-bit systems */
+#define ULONG_MAX_VALUE maximum_unsigned_value_of_type(uLong)
+static inline uInt zlib_buf_cap(size_t len)
 {
 	return (ZLIB_BUF_MAX < len) ? ZLIB_BUF_MAX : len;
+}
+
+static inline uLong zlib_uLong_cap(size_t s)
+{
+	return s < ULONG_MAX_VALUE ? (uLong)s : ULONG_MAX_VALUE;
 }
 
 static void zlib_pre_call(git_zstream *s)
 {
 	s->z.next_in = s->next_in;
 	s->z.next_out = s->next_out;
-	s->z.total_in = s->total_in;
-	s->z.total_out = s->total_out;
+	s->z.total_in = zlib_uLong_cap(s->total_in);
+	s->z.total_out = zlib_uLong_cap(s->total_out);
 	s->z.avail_in = zlib_buf_cap(s->avail_in);
 	s->z.avail_out = zlib_buf_cap(s->avail_out);
 }
 
-static void zlib_post_call(git_zstream *s)
+static void zlib_post_call(git_zstream *s, int status)
 {
-	unsigned long bytes_consumed;
-	unsigned long bytes_produced;
+	size_t bytes_consumed;
+	size_t bytes_produced;
 
 	bytes_consumed = s->z.next_in - s->next_in;
 	bytes_produced = s->z.next_out - s->next_out;
-	if (s->z.total_out != s->total_out + bytes_produced)
+	/*
+	 * zlib's total_out/total_in are uLong which may wrap for >4GB.
+	 * We track our own totals and verify only the low bits match.
+	 */
+	if ((s->z.total_out & ULONG_MAX_VALUE) !=
+	    ((zlib_uLong_cap(s->total_out) + bytes_produced) & ULONG_MAX_VALUE))
 		BUG("total_out mismatch");
-	if (s->z.total_in != s->total_in + bytes_consumed)
+	/*
+	 * zlib does not update total_in when it returns Z_NEED_DICT,
+	 * causing a mismatch here. Skip the sanity check in that case.
+	 */
+	if (status != Z_NEED_DICT &&
+	    (s->z.total_in & ULONG_MAX_VALUE) !=
+	    ((zlib_uLong_cap(s->total_in) + bytes_consumed) & ULONG_MAX_VALUE))
 		BUG("total_in mismatch");
 
-	s->total_out = s->z.total_out;
-	s->total_in = s->z.total_in;
-	s->next_in = s->z.next_in;
+	s->total_out += bytes_produced;
+	s->total_in += bytes_consumed;
+	/* zlib-ng marks `next_in` as `const`, so we have to cast it away. */
+	s->next_in = (unsigned char *) s->z.next_in;
 	s->next_out = s->z.next_out;
 	s->avail_in -= bytes_consumed;
 	s->avail_out -= bytes_produced;
@@ -71,7 +91,7 @@ void git_inflate_init(git_zstream *strm)
 
 	zlib_pre_call(strm);
 	status = inflateInit(&strm->z);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	if (status == Z_OK)
 		return;
 	die("inflateInit: %s (%s)", zerr_to_string(status),
@@ -89,7 +109,7 @@ void git_inflate_init_gzip_only(git_zstream *strm)
 
 	zlib_pre_call(strm);
 	status = inflateInit2(&strm->z, windowBits);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	if (status == Z_OK)
 		return;
 	die("inflateInit2: %s (%s)", zerr_to_string(status),
@@ -102,7 +122,7 @@ void git_inflate_end(git_zstream *strm)
 
 	zlib_pre_call(strm);
 	status = inflateEnd(&strm->z);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	if (status == Z_OK)
 		return;
 	error("inflateEnd: %s (%s)", zerr_to_string(status),
@@ -121,7 +141,7 @@ int git_inflate(git_zstream *strm, int flush)
 				 ? 0 : flush);
 		if (status == Z_MEM_ERROR)
 			die("inflate: out of memory");
-		zlib_post_call(strm);
+		zlib_post_call(strm, status);
 
 		/*
 		 * Let zlib work another round, while we can still
@@ -147,13 +167,21 @@ int git_inflate(git_zstream *strm, int flush)
 	return status;
 }
 
-#if defined(NO_DEFLATE_BOUND) || ZLIB_VERNUM < 0x1200
-#define deflateBound(c,s)  ((s) + (((s) + 7) >> 3) + (((s) + 63) >> 6) + 11)
-#endif
-
-unsigned long git_deflate_bound(git_zstream *strm, unsigned long size)
+size_t git_deflate_bound(git_zstream *strm, size_t size)
 {
-	return deflateBound(&strm->z, size);
+#if SIZE_MAX > ULONG_MAX
+	if (size > maximum_unsigned_value_of_type(uLong))
+		/*
+		 * deflateBound() takes uLong, which is 32-bit on
+		 * Windows. For inputs above that range, return zlib's
+		 * stored-block formula (the conservative path it would
+		 * itself use for an unknown stream state) plus the
+		 * worst-case wrapper overhead.
+		 */
+		return size + (size >> 5) + (size >> 7) + (size >> 11)
+			+ 7 + 18;
+#endif
+	return deflateBound(&strm->z, (uLong)size);
 }
 
 void git_deflate_init(git_zstream *strm, int level)
@@ -163,7 +191,7 @@ void git_deflate_init(git_zstream *strm, int level)
 	memset(strm, 0, sizeof(*strm));
 	zlib_pre_call(strm);
 	status = deflateInit(&strm->z, level);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	if (status == Z_OK)
 		return;
 	die("deflateInit: %s (%s)", zerr_to_string(status),
@@ -179,7 +207,7 @@ static void do_git_deflate_init(git_zstream *strm, int level, int windowBits)
 	status = deflateInit2(&strm->z, level,
 				  Z_DEFLATED, windowBits,
 				  8, Z_DEFAULT_STRATEGY);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	if (status == Z_OK)
 		return;
 	die("deflateInit2: %s (%s)", zerr_to_string(status),
@@ -210,7 +238,7 @@ int git_deflate_abort(git_zstream *strm)
 
 	zlib_pre_call(strm);
 	status = deflateEnd(&strm->z);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	return status;
 }
 
@@ -230,7 +258,7 @@ int git_deflate_end_gently(git_zstream *strm)
 
 	zlib_pre_call(strm);
 	status = deflateEnd(&strm->z);
-	zlib_post_call(strm);
+	zlib_post_call(strm, status);
 	return status;
 }
 
@@ -247,7 +275,7 @@ int git_deflate(git_zstream *strm, int flush)
 				 ? 0 : flush);
 		if (status == Z_MEM_ERROR)
 			die("deflate: out of memory");
-		zlib_post_call(strm);
+		zlib_post_call(strm, status);
 
 		/*
 		 * Let zlib work another round, while we can still

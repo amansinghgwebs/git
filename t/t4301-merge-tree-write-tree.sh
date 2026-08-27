@@ -4,13 +4,6 @@ test_description='git merge-tree --write-tree'
 
 . ./test-lib.sh
 
-# This test is ort-specific
-if test "$GIT_TEST_MERGE_ALGORITHM" != "ort"
-then
-	skip_all="GIT_TEST_MERGE_ALGORITHM != ort"
-	test_done
-fi
-
 test_expect_success setup '
 	test_write_lines 1 2 3 4 5 >numbers &&
 	echo hello >greeting &&
@@ -61,6 +54,25 @@ test_expect_success setup '
 	git commit -m first-commit
 '
 
+test_expect_success '--quiet on clean merge' '
+	# Get rid of loose objects to start with
+	git gc &&
+	echo "0 objects, 0 kilobytes" >expect &&
+	git count-objects >actual &&
+	test_cmp expect actual &&
+
+	# Ensure merge is successful (exit code of 0)
+	git merge-tree --write-tree --quiet side1 side3 >output &&
+
+	# Ensure there is no output
+	test_must_be_empty output &&
+
+	# Ensure no loose objects written (all new objects written would have
+	# been in "outer layer" of the merge)
+	git count-objects >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'Clean merge' '
 	TREE_OID=$(git merge-tree --write-tree side1 side3) &&
 	q_to_tab <<-EOF >expect &&
@@ -70,6 +82,31 @@ test_expect_success 'Clean merge' '
 	EOF
 
 	git ls-tree $TREE_OID >actual &&
+	test_cmp expect actual
+'
+
+# Repeat the previous test, but turn off rename detection
+test_expect_success 'Failed merge without rename detection' '
+	test_must_fail git -c diff.renames=false merge-tree --write-tree side1 side3 >out &&
+	test_grep "CONFLICT (modify/delete): numbers deleted" out
+'
+
+test_expect_success  '--quiet on conflicted merge' '
+	# Get rid of loose objects to start with
+	git gc &&
+	echo "0 objects, 0 kilobytes" >expect &&
+	git count-objects >actual &&
+	test_cmp expect actual &&
+
+	# Ensure merge has conflict
+	test_expect_code 1 git merge-tree --write-tree --quiet side1 side2 >output &&
+
+	# Ensure there is no output
+	test_must_be_empty output &&
+
+	# Ensure no loose objects written (all new objects written would have
+	# been in "outer layer" of the merge)
+	git count-objects >actual &&
 	test_cmp expect actual
 '
 
@@ -124,13 +161,13 @@ test_expect_success 'Barf on misspelled option, with exit code other than 0 or 1
 	# Mis-spell with single "s" instead of double "s"
 	test_expect_code 129 git merge-tree --write-tree --mesages FOOBAR side1 side2 2>expect &&
 
-	grep "error: unknown option.*mesages" expect
+	test_grep "error: unknown option.*mesages" expect
 '
 
 test_expect_success 'Barf on too many arguments' '
 	test_expect_code 129 git merge-tree --write-tree side1 side2 invalid 2>expect &&
 
-	grep "^usage: git merge-tree" expect
+	test_grep "^usage: git merge-tree" expect
 '
 
 anonymize_hash() {
@@ -315,7 +352,7 @@ test_expect_success 'rename/add handling' '
 		#
 		hash=$(tr "\0" "\n" <out | head -n 3 | grep 3.bar | cut -f 2 -d " ") &&
 		git rev-list --objects --all >all_blobs &&
-		! grep $hash all_blobs &&
+		test_grep ! $hash all_blobs &&
 
 		#
 		# Second, check anonymized hash output against expectation
@@ -382,7 +419,7 @@ test_expect_success SYMLINKS 'rename/add, where add is a mode conflict' '
 		#
 		hash=$(tr "\0" "\n" <out | head -n 3 | grep 3.bar | cut -f 2 -d " ") &&
 		git rev-list --objects --all >all_blobs &&
-		! grep $hash all_blobs &&
+		test_grep ! $hash all_blobs &&
 
 		#
 		# Second, check anonymized hash output against expectation
@@ -633,8 +670,8 @@ test_expect_success 'mod6: chains of rename/rename(1to2) and add/add via collidi
 		hash1=$(tr "\0" "\n" <out | head | grep 2.four | cut -f 2 -d " ") &&
 		hash2=$(tr "\0" "\n" <out | head | grep 3.two | cut -f 2 -d " ") &&
 		git rev-list --objects --all >all_blobs &&
-		! grep $hash1 all_blobs &&
-		! grep $hash2 all_blobs &&
+		test_grep ! $hash1 all_blobs &&
+		test_grep ! $hash2 all_blobs &&
 
 		#
 		# Now compare anonymized hash output with expectation
@@ -820,7 +857,7 @@ test_expect_success 'NUL terminated conflicted file "lines"' '
 test_expect_success 'error out by default for unrelated histories' '
 	test_expect_code 128 git merge-tree --write-tree side1 unrelated 2>error &&
 
-	grep "refusing to merge unrelated histories" error
+	test_grep "refusing to merge unrelated histories" error
 '
 
 test_expect_success 'can override merge of unrelated histories' '
@@ -887,7 +924,7 @@ test_expect_success '--stdin with both a successful and a conflicted merge' '
 test_expect_success '--merge-base is incompatible with --stdin' '
 	test_must_fail git merge-tree --merge-base=side1 --stdin 2>expect &&
 
-	grep "^fatal: .*merge-base.*stdin.* cannot be used together" expect
+	test_grep "^fatal: .*merge-base.*stdin.* cannot be used together" expect
 '
 
 # specify merge-base as parent of branch2

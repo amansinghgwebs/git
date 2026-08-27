@@ -1,37 +1,40 @@
 api_docs = [
-  'api-error-handling.txt',
-  'api-merge.txt',
-  'api-parse-options.txt',
-  'api-simple-ipc.txt',
-  'api-trace2.txt',
+  'api-error-handling.adoc',
+  'api-merge.adoc',
+  'api-parse-options.adoc',
+  'api-simple-ipc.adoc',
+  'api-trace2.adoc',
 ]
 
 articles = [
-  'bitmap-format.txt',
-  'build-systems.txt',
-  'bundle-uri.txt',
-  'commit-graph.txt',
-  'directory-rename-detection.txt',
-  'hash-function-transition.txt',
-  'long-running-process-protocol.txt',
-  'multi-pack-index.txt',
-  'packfile-uri.txt',
-  'pack-heuristics.txt',
-  'parallel-checkout.txt',
-  'partial-clone.txt',
-  'platform-support.txt',
-  'racy-git.txt',
-  'reftable.txt',
-  'remembering-renames.txt',
-  'repository-version.txt',
-  'rerere.txt',
-  'scalar.txt',
-  'send-pack-pipeline.txt',
-  'shallow.txt',
-  'sparse-checkout.txt',
-  'sparse-index.txt',
-  'trivial-merge.txt',
-  'unit-tests.txt',
+  'bitmap-format.adoc',
+  'build-systems.adoc',
+  'bundle-uri.adoc',
+  'commit-graph.adoc',
+  'directory-rename-detection.adoc',
+  'hash-function-transition.adoc',
+  'large-object-promisors.adoc',
+  'long-running-process-protocol.adoc',
+  'multi-pack-index.adoc',
+  'packfile-uri.adoc',
+  'pack-heuristics.adoc',
+  'paint-down-to-common.adoc',
+  'parallel-checkout.adoc',
+  'partial-clone.adoc',
+  'platform-support.adoc',
+  'racy-git.adoc',
+  'reftable.adoc',
+  'remembering-renames.adoc',
+  'repository-version.adoc',
+  'rerere.adoc',
+  'scalar.adoc',
+  'send-pack-pipeline.adoc',
+  'shallow.adoc',
+  'sparse-checkout.adoc',
+  'sparse-index.adoc',
+  'trivial-merge.adoc',
+  'unambiguous-types.adoc',
+  'unit-tests.adoc',
 ]
 
 api_index = custom_target(
@@ -43,25 +46,25 @@ api_index = custom_target(
   ],
   env: script_environment,
   input: api_docs,
-  output: 'api-index.txt',
+  output: 'api-index.adoc',
 )
 
-custom_target(
+doc_targets += custom_target(
   command: asciidoc_html_options,
   input: api_index,
   output: 'api-index.html',
   depends: documentation_deps,
   install: true,
-  install_dir: get_option('datadir') / 'doc/git-doc/technical',
+  install_dir: htmldir / 'technical',
 )
 
 foreach article : api_docs + articles
-  custom_target(
+  doc_targets += custom_target(
     command: asciidoc_html_options,
     input: article,
     output: fs.stem(article) + '.html',
     depends: documentation_deps,
     install: true,
-    install_dir: get_option('datadir') / 'doc/git-doc/technical',
+    install_dir: htmldir / 'technical',
   )
 endforeach

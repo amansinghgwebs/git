@@ -256,6 +256,25 @@ test_expect_success 'submodule update --remote should fetch upstream changes' '
 	)
 '
 
+test_expect_success 'submodule update --remote resolves URL rewrites' '
+	test_config_global "url.$(pwd)/.insteadOf" local: &&
+	mkdir alias-super alias-submodule &&
+	(
+		cd alias-submodule &&
+		git init &&
+		git commit --allow-empty --message "Initial commit"
+	) &&
+	(
+		cd alias-super &&
+		git init &&
+		git submodule add local:alias-submodule submodule &&
+		git submodule update --force &&
+		git -C submodule remote rename origin upstream &&
+		git -C submodule remote add fork user@host &&
+		git submodule update --remote
+	)
+'
+
 test_expect_success 'submodule update --remote should fetch upstream changes with .' '
 	(
 		cd super &&
@@ -627,10 +646,10 @@ test_expect_success 'submodule update - update=none in .git/config' '
 	  compare_head
 	 ) &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 git submodule update &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 (cd submodule &&
 	  compare_head
 	 ) &&
@@ -647,10 +666,10 @@ test_expect_success 'submodule update - update=none in .git/config but --checkou
 	  compare_head
 	 ) &&
 	 git diff --name-only >out &&
-	 grep ^submodule$ out &&
+	 test_grep ^submodule$ out &&
 	 git submodule update --checkout &&
 	 git diff --name-only >out &&
-	 ! grep ^submodule$ out &&
+	 test_grep ! ^submodule$ out &&
 	 (cd submodule &&
 	  ! compare_head
 	 ) &&
@@ -679,10 +698,10 @@ test_expect_success 'submodule update with pathspec warns against uninitialized 
 		git submodule init submodule &&
 
 		git submodule update submodule 2>err &&
-		! grep "Submodule path .* not initialized" err &&
+		test_grep ! "Submodule path .* not initialized" err &&
 
 		git submodule update rebasing 2>err &&
-		grep "Submodule path .rebasing. not initialized" err &&
+		test_grep "Submodule path .rebasing. not initialized" err &&
 
 		test_path_exists submodule/.git &&
 		test_path_is_missing rebasing/.git
@@ -699,7 +718,7 @@ test_expect_success 'submodule update without pathspec updates only initialized 
 		git submodule update 2>err &&
 		test_path_exists submodule/.git &&
 		test_path_is_missing rebasing/.git &&
-		! grep "Submodule path .* not initialized" err
+		test_grep ! "Submodule path .* not initialized" err
 	)
 
 '
@@ -1046,26 +1065,34 @@ test_expect_success 'submodule update --recursive drops module name before recur
 test_expect_success 'submodule update can be run in parallel' '
 	(cd super2 &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update --jobs 7 &&
-	 grep "7 tasks" trace.out &&
+	 test_grep "7 tasks" trace.out &&
 	 git config submodule.fetchJobs 8 &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update &&
-	 grep "8 tasks" trace.out &&
+	 test_grep "8 tasks" trace.out &&
 	 GIT_TRACE=$(pwd)/trace.out git submodule update --jobs 9 &&
-	 grep "9 tasks" trace.out
+	 test_grep "9 tasks" trace.out
 	)
+'
+
+test_expect_success 'submodule update honors fetch jobs config from .gitmodules' '
+	test_when_finished "rm -rf super3" &&
+	git clone cloned super3 &&
+	git -C super3 config -f .gitmodules submodule.fetchJobs 67 &&
+	GIT_TRACE="$(pwd)/trace.out" git -C super3 submodule update --init &&
+	test_grep "67 tasks" trace.out
 '
 
 test_expect_success 'git clone passes the parallel jobs config on to submodules' '
 	test_when_finished "rm -rf super4" &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules --jobs 7 . super4 &&
-	grep "7 tasks" trace.out &&
+	test_grep "7 tasks" trace.out &&
 	rm -rf super4 &&
 	git config --global submodule.fetchJobs 8 &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules . super4 &&
-	grep "8 tasks" trace.out &&
+	test_grep "8 tasks" trace.out &&
 	rm -rf super4 &&
 	GIT_TRACE=$(pwd)/trace.out git clone --recurse-submodules --jobs 9 . super4 &&
-	grep "9 tasks" trace.out &&
+	test_grep "9 tasks" trace.out &&
 	rm -rf super4
 '
 
@@ -1093,12 +1120,17 @@ test_expect_success 'submodule update --quiet passes quietness to fetch with a s
 	) &&
 	git clone super4 super5 &&
 	(cd super5 &&
-	 git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
+	 # This test var can mess with the stderr output checked in this test.
+	 GIT_TEST_NAME_HASH_VERSION=1 \
+	 GIT_TEST_PACK_PATH_WALK=0 \
+		git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
 	 test_must_be_empty out &&
 	 test_must_be_empty err
 	) &&
 	git clone super4 super6 &&
 	(cd super6 &&
+	 # This test variable will create a "warning" message to stderr
+	 GIT_TEST_PACK_PATH_WALK=0 \
 	 git submodule update --init --depth=1 submodule3 >out 2>err &&
 	 test_file_not_empty out &&
 	 test_file_not_empty err
@@ -1130,6 +1162,67 @@ test_expect_success 'setup clean recursive superproject' '
 	git -C top submodule add ../middle middle &&
 	git -C top commit -m "top" &&
 	git clone --recurse-submodules top top-clean
+'
+
+test_expect_success 'submodule update with multiple remotes' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	# Create a commit in each repo, starting with bottom
+	test_commit -C bottom multiple_remote_commit &&
+	# Create middle commit
+	git -C middle/bottom fetch &&
+	git -C middle/bottom checkout -f FETCH_HEAD &&
+	git -C middle add bottom &&
+	git -C middle commit -m "multiple_remote_commit" &&
+	# Create top commit
+	git -C top/middle fetch &&
+	git -C top/middle checkout -f FETCH_HEAD &&
+	git -C top add middle &&
+	git -C top commit -m "multiple_remote_commit" &&
+
+	# rename the submodule remote
+	git -C top-cloned/middle remote rename origin upstream &&
+
+	# Add another remote
+	git -C top-cloned/middle remote add other bogus &&
+
+	# Make the update of "middle" a no-op, otherwise we error out
+	# because of its unmerged state
+	test_config -C top-cloned submodule.middle.update !true &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	EOF
+	test_cmp expect.err actual.err
+'
+
+test_expect_success 'submodule update with renamed remote' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	# Create a commit in each repo, starting with bottom
+	test_commit -C bottom rename_commit &&
+	# Create middle commit
+	git -C middle/bottom fetch &&
+	git -C middle/bottom checkout -f FETCH_HEAD &&
+	git -C middle add bottom &&
+	git -C middle commit -m "rename_commit" &&
+	# Create top commit
+	git -C top/middle fetch &&
+	git -C top/middle checkout -f FETCH_HEAD &&
+	git -C top add middle &&
+	git -C top commit -m "rename_commit" &&
+
+	# rename the submodule remote
+	git -C top-cloned/middle remote rename origin upstream &&
+
+	# Make the update of "middle" a no-op, otherwise we error out
+	# because of its unmerged state
+	test_config -C top-cloned submodule.middle.update !true &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	EOF
+	test_cmp expect.err actual.err
 '
 
 test_expect_success 'submodule update should skip unmerged submodules' '

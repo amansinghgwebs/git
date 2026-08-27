@@ -34,14 +34,24 @@ test_expect_success 'GIT_EXTERNAL_DIFF environment' '
 
 test_expect_success 'GIT_EXTERNAL_DIFF environment should apply only to diff' '
 	GIT_EXTERNAL_DIFF=echo git log -p -1 HEAD >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
 '
 
 test_expect_success 'GIT_EXTERNAL_DIFF environment and --no-ext-diff' '
 	GIT_EXTERNAL_DIFF=echo git diff --no-ext-diff >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
+'
+
+test_expect_success 'GIT_EXTERNAL_DIFF and --output' '
+	cat >expect <<-EOF &&
+	file $(git rev-parse --verify HEAD:file) 100644 file $(test_oid zero) 100644
+	EOF
+	GIT_EXTERNAL_DIFF=echo git diff --output=out >stdout &&
+	cut -d" " -f1,3- <out >actual &&
+	test_must_be_empty stdout &&
+	test_cmp expect actual
 '
 
 test_expect_success SYMLINKS 'typechange diff' '
@@ -76,13 +86,13 @@ test_expect_success 'diff.external' '
 test_expect_success 'diff.external should apply only to diff' '
 	test_config diff.external echo &&
 	git log -p -1 HEAD >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 '
 
 test_expect_success 'diff.external and --no-ext-diff' '
 	test_config diff.external echo &&
 	git diff --no-ext-diff >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 '
 
 test_expect_success 'diff attribute' '
@@ -103,13 +113,13 @@ test_expect_success 'diff attribute' '
 
 test_expect_success 'diff attribute should apply only to diff' '
 	git log -p -1 HEAD >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
 '
 
 test_expect_success 'diff attribute and --no-ext-diff' '
 	git diff --no-ext-diff >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
 '
 
@@ -130,13 +140,13 @@ test_expect_success 'diff attribute' '
 
 test_expect_success 'diff attribute should apply only to diff' '
 	git log -p -1 HEAD >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
 '
 
 test_expect_success 'diff attribute and --no-ext-diff' '
 	git diff --no-ext-diff >out &&
-	grep "^diff --git a/file b/file" out
+	test_grep "^diff --git a/file b/file" out
 
 '
 
@@ -168,7 +178,7 @@ test_expect_success 'attributes trump GIT_EXTERNAL_DIFF and diff.external' '
 test_expect_success 'no diff with -diff' '
 	echo >.gitattributes "file -diff" &&
 	git diff >out &&
-	grep Binary out
+	test_grep Binary out
 '
 
 check_external_diff () {
@@ -237,7 +247,7 @@ check_external_diff   0 empty  empty 0 on  --quiet
 check_external_diff   1 empty  empty 1 on  --quiet
 check_external_diff 128 empty  error 2 on  --quiet
 
-echo NULZbetweenZwords | perl -pe 'y/Z/\000/' > file
+echo NULZbetweenZwords | tr "Z" "\000" > file
 
 test_expect_success 'force diff with "diff"' '
 	after=$(git hash-object file) &&

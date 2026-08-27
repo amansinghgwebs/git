@@ -6,12 +6,12 @@
  * Copyright (C) Linus Torvalds, 2005
  */
 
-#define USE_THE_REPOSITORY_VARIABLE
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "builtin.h"
 #include "config.h"
 #include "convert.h"
+#include "environment.h"
 #include "quote.h"
 #include "dir.h"
 #include "gettext.h"
@@ -26,7 +26,7 @@
 #include "setup.h"
 #include "sparse-index.h"
 #include "submodule.h"
-#include "object-store.h"
+#include "odb.h"
 #include "hex.h"
 
 
@@ -234,7 +234,8 @@ static void show_submodule(struct repository *superproject,
 {
 	struct repository subrepo;
 
-	if (repo_submodule_init(&subrepo, superproject, path, null_oid()))
+	if (repo_submodule_init(&subrepo, superproject, path,
+				null_oid(superproject->hash_algo)))
 		return;
 
 	if (repo_read_index(&subrepo) < 0)
@@ -245,23 +246,27 @@ static void show_submodule(struct repository *superproject,
 	repo_clear(&subrepo);
 }
 
-static void expand_objectsize(struct strbuf *line, const struct object_id *oid,
+static void expand_objectsize(struct repository *repo, struct strbuf *line,
+			      const struct object_id *oid,
 			      const enum object_type type, unsigned int padded)
 {
+	static const char padding[] = "       ";
+	size_t min_len = padded ? strlen(padding) : 0;
+	size_t orig_len = line->len;
+	size_t len;
+
 	if (type == OBJ_BLOB) {
-		unsigned long size;
-		if (oid_object_info(the_repository, oid, &size) < 0)
+		size_t size;
+		if (odb_read_object_info(repo->objects, oid, &size) < 0)
 			die(_("could not get object info about '%s'"),
 			    oid_to_hex(oid));
-		if (padded)
-			strbuf_addf(line, "%7"PRIuMAX, (uintmax_t)size);
-		else
-			strbuf_addf(line, "%"PRIuMAX, (uintmax_t)size);
-	} else if (padded) {
-		strbuf_addf(line, "%7s", "-");
+		strbuf_add_uint(line, size);
 	} else {
 		strbuf_addstr(line, "-");
 	}
+	len = line->len - orig_len;
+	if (len < min_len)
+		strbuf_insert(line, orig_len, padding, min_len - len);
 }
 
 static void show_ce_fmt(struct repository *repo, const struct cache_entry *ce,
@@ -283,10 +288,10 @@ static void show_ce_fmt(struct repository *repo, const struct cache_entry *ce,
 		else if (skip_prefix(format, "(objecttype)", &format))
 			strbuf_addstr(&sb, type_name(object_type(ce->ce_mode)));
 		else if (skip_prefix(format, "(objectsize:padded)", &format))
-			expand_objectsize(&sb, &ce->oid,
+			expand_objectsize(repo, &sb, &ce->oid,
 					  object_type(ce->ce_mode), 1);
 		else if (skip_prefix(format, "(objectsize)", &format))
-			expand_objectsize(&sb, &ce->oid,
+			expand_objectsize(repo, &sb, &ce->oid,
 					  object_type(ce->ce_mode), 0);
 		else if (skip_prefix(format, "(stage)", &format))
 			strbuf_addf(&sb, "%d", ce_stage(ce));
@@ -348,7 +353,7 @@ static void show_ce(struct repository *repo, struct dir_struct *dir,
 	}
 }
 
-static void show_ru_info(struct index_state *istate)
+static void show_ru_info(struct repository *repo, struct index_state *istate)
 {
 	struct string_list_item *item;
 
@@ -370,7 +375,7 @@ static void show_ru_info(struct index_state *istate)
 			if (!ui->mode[i])
 				continue;
 			printf("%s%06o %s %d\t", tag_resolve_undo, ui->mode[i],
-			       repo_find_unique_abbrev(the_repository, &ui->oid[i], abbrev),
+			       repo_find_unique_abbrev(repo, &ui->oid[i], abbrev),
 			       i + 1);
 			write_name(path);
 		}
@@ -412,13 +417,20 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 	if (!(show_cached || show_stage || show_deleted || show_modified))
 		return;
 
-	if (!show_sparse_dirs)
-		ensure_full_index(repo->index);
-
 	for (i = 0; i < repo->index->cache_nr; i++) {
 		const struct cache_entry *ce = repo->index->cache[i];
 		struct stat st;
 		int stat_err;
+
+		if (S_ISSPARSEDIR(ce->ce_mode) && !show_sparse_dirs) {
+			/*
+			 * This is the first time we've hit a sparse dir,
+			 * so expansion will leave the first 'i' entries
+			 * alone.
+			 */
+			ensure_full_index(repo->index);
+			ce = repo->index->cache[i];
+		}
 
 		construct_fullname(&fullname, repo, ce);
 
@@ -440,6 +452,17 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 		if (!(show_deleted || show_modified))
 			continue;
 		if (ce_skip_worktree(ce))
+			continue;
+		/*
+		 * match_pathspec() is linear in pathspec.nr, so prefilter only
+		 * the single-pathspec case. Only entries shown by show_ce()
+		 * satisfy --error-unmatch.
+		 */
+		if (pathspec.nr == 1 &&
+		    !match_pathspec(repo->index, &pathspec, fullname.buf,
+				    fullname.len, max_prefix_len, NULL,
+				    S_ISDIR(ce->ce_mode) ||
+				    S_ISGITLINK(ce->ce_mode)))
 			continue;
 		stat_err = lstat(fullname.buf, &st);
 		if (stat_err && (errno != ENOENT && errno != ENOTDIR))
@@ -567,7 +590,7 @@ static int option_parse_exclude_standard(const struct option *opt,
 int cmd_ls_files(int argc,
 		 const char **argv,
 		 const char *cmd_prefix,
-		 struct repository *repo UNUSED)
+		 struct repository *repo)
 {
 	int require_work_tree = 0, show_tag = 0, i;
 	char *max_prefix;
@@ -647,15 +670,15 @@ int cmd_ls_files(int argc,
 	show_usage_with_options_if_asked(argc, argv,
 					 ls_files_usage, builtin_ls_files_options);
 
-	prepare_repo_settings(the_repository);
-	the_repository->settings.command_requires_full_index = 0;
+	prepare_repo_settings(repo);
+	repo->settings.command_requires_full_index = 0;
 
 	prefix = cmd_prefix;
 	if (prefix)
 		prefix_len = strlen(prefix);
-	git_config(git_default_config, NULL);
+	repo_config(repo, git_default_config, NULL);
 
-	if (repo_read_index(the_repository) < 0)
+	if (repo_read_index(repo) < 0)
 		die("index file corrupt");
 
 	argc = parse_options(argc, argv, prefix, builtin_ls_files_options,
@@ -694,8 +717,8 @@ int cmd_ls_files(int argc,
 	if (dir.exclude_per_dir)
 		exc_given = 1;
 
-	if (require_work_tree && !is_inside_work_tree())
-		setup_work_tree();
+	if (require_work_tree && !is_inside_work_tree(repo))
+		setup_work_tree(repo);
 
 	if (recurse_submodules &&
 	    (show_deleted || show_others || show_unmerged ||
@@ -724,7 +747,7 @@ int cmd_ls_files(int argc,
 		max_prefix = common_prefix(&pathspec);
 	max_prefix_len = get_common_prefix_len(max_prefix);
 
-	prune_index(the_repository->index, max_prefix, max_prefix_len);
+	prune_index(repo->index, max_prefix, max_prefix_len);
 
 	/* Treat unmatching pathspec elements as errors */
 	if (pathspec.nr && error_unmatch)
@@ -748,13 +771,13 @@ int cmd_ls_files(int argc,
 		 */
 		if (show_stage || show_unmerged)
 			die(_("options '%s' and '%s' cannot be used together"), "ls-files --with-tree", "-s/-u");
-		overlay_tree_on_index(the_repository->index, with_tree, max_prefix);
+		overlay_tree_on_index(repo->index, with_tree, max_prefix);
 	}
 
-	show_files(the_repository, &dir);
+	show_files(repo, &dir);
 
 	if (show_resolve_undo)
-		show_ru_info(the_repository->index);
+		show_ru_info(repo, repo->index);
 
 	if (ps_matched && report_path_error(ps_matched, &pathspec)) {
 		fprintf(stderr, "Did you forget to 'git add'?\n");

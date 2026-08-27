@@ -17,8 +17,9 @@
 #include "gettext.h"
 #include "hex.h"
 #include "refs.h"
+#include "object-file.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "path.h"
 #include "tag.h"
 #include "parse-options.h"
@@ -148,11 +149,11 @@ static int verify_tag(const char *name, const char *ref UNUSED,
 	if (format->format)
 		flags = GPG_VERIFY_OMIT_STATUS;
 
-	if (gpg_verify_tag(oid, name, flags))
+	if (gpg_verify_tag(the_repository, oid, name, flags))
 		return -1;
 
 	if (format->format)
-		pretty_print_ref(name, oid, format);
+		pretty_print_ref(name, oid, NULL, format);
 
 	return 0;
 }
@@ -166,16 +167,16 @@ static int do_sign(struct strbuf *buffer, struct object_id **compat_oid,
 	char *keyid = get_signing_key();
 	int ret = -1;
 
-	if (sign_buffer(buffer, &sig, keyid))
+	if (sign_buffer(buffer, &sig, keyid, 0))
 		goto out;
 
 	if (compat) {
 		const struct git_hash_algo *algo = the_repository->hash_algo;
 
-		if (convert_object_file(&compat_buf, algo, compat,
+		if (convert_object_file(the_repository ,&compat_buf, algo, compat,
 					buffer->buf, buffer->len, OBJ_TAG, 1))
 			goto out;
-		if (sign_buffer(&compat_buf, &compat_sig, keyid))
+		if (sign_buffer(&compat_buf, &compat_sig, keyid, 0))
 			goto out;
 		add_header_signature(&compat_buf, &sig, algo);
 		strbuf_addbuf(&compat_buf, &compat_sig);
@@ -237,13 +238,13 @@ static int git_tag_config(const char *var, const char *value,
 
 static void write_tag_body(int fd, const struct object_id *oid)
 {
-	unsigned long size;
+	size_t size;
 	enum object_type type;
 	char *buf, *sp, *orig;
 	struct strbuf payload = STRBUF_INIT;
 	struct strbuf signature = STRBUF_INIT;
 
-	orig = buf = repo_read_object_file(the_repository, oid, &type, &size);
+	orig = buf = odb_read_object(the_repository->objects, oid, &type, &size);
 	if (!buf)
 		return;
 	if (parse_signature(buf, size, &payload, &signature)) {
@@ -270,8 +271,8 @@ static int build_tag_object(struct strbuf *buf, int sign, struct object_id *resu
 	struct object_id *compat_oid = NULL, compat_oid_buf;
 	if (sign && do_sign(buf, &compat_oid, &compat_oid_buf) < 0)
 		return error(_("unable to sign the tag"));
-	if (write_object_file_flags(buf->buf, buf->len, OBJ_TAG, result,
-				    compat_oid, 0) < 0)
+	if (odb_write_object_ext(the_repository->objects, buf->buf,
+				 buf->len, OBJ_TAG, result, compat_oid, 0) < 0)
 		return error(_("unable to write tag file"));
 	return 0;
 }
@@ -303,7 +304,7 @@ static void create_tag(const struct object_id *object, const char *object_ref,
 	struct strbuf header = STRBUF_INIT;
 	int should_edit;
 
-	type = oid_object_info(the_repository, object, NULL);
+	type = odb_read_object_info(the_repository->objects, object, NULL);
 	if (type <= OBJ_NONE)
 		die(_("bad object type."));
 
@@ -387,7 +388,7 @@ static void create_reflog_msg(const struct object_id *oid, struct strbuf *sb)
 	enum object_type type;
 	struct commit *c;
 	char *buf;
-	unsigned long size;
+	size_t size;
 	int subject_len = 0;
 	const char *subject_start;
 
@@ -400,13 +401,13 @@ static void create_reflog_msg(const struct object_id *oid, struct strbuf *sb)
 	}
 
 	strbuf_addstr(sb, " (");
-	type = oid_object_info(the_repository, oid, NULL);
+	type = odb_read_object_info(the_repository->objects, oid, NULL);
 	switch (type) {
 	default:
 		strbuf_addstr(sb, "object of unknown type");
 		break;
 	case OBJ_COMMIT:
-		if ((buf = repo_read_object_file(the_repository, oid, &type, &size))) {
+		if ((buf = odb_read_object(the_repository->objects, oid, &type, &size))) {
 			subject_len = find_commit_subject(buf, &subject_start);
 			strbuf_insert(sb, sb->len, subject_start, subject_len);
 		} else {
@@ -479,9 +480,16 @@ int cmd_tag(int argc,
 	int edit_flag = 0;
 	struct option options[] = {
 		OPT_CMDMODE('l', "list", &cmdmode, N_("list tag names"), 'l'),
-		{ OPTION_INTEGER, 'n', NULL, &filter.lines, N_("n"),
-				N_("print <n> lines of each tag message"),
-				PARSE_OPT_OPTARG, NULL, 1 },
+		{
+			.type = OPTION_INTEGER,
+			.short_name = 'n',
+			.value = &filter.lines,
+			.precision = sizeof(filter.lines),
+			.argh = N_("n"),
+			.help = N_("print <n> lines of each tag message"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = 1,
+		},
 		OPT_CMDMODE('d', "delete", &cmdmode, N_("delete tags"), 'd'),
 		OPT_CMDMODE('v', "verify", &cmdmode, N_("verify tags"), 'v'),
 
@@ -491,8 +499,8 @@ int cmd_tag(int argc,
 		OPT_CALLBACK_F('m', "message", &msg, N_("message"),
 			       N_("tag message"), PARSE_OPT_NONEG, parse_msg_arg),
 		OPT_FILENAME('F', "file", &msgfile, N_("read message from file")),
-		OPT_PASSTHRU_ARGV(0, "trailer", &trailer_args, N_("trailer"),
-				  N_("add custom trailer(s)"), PARSE_OPT_NONEG),
+		OPT_STRVEC(0, "trailer", &trailer_args, N_("trailer"),
+			   N_("add custom trailer(s)")),
 		OPT_BOOL('e', "edit", &edit_flag, N_("force edit of tag message")),
 		OPT_BOOL('s', "sign", &opt.sign, N_("annotated and GPG-signed tag")),
 		OPT_CLEANUP(&cleanup_arg),
@@ -513,9 +521,14 @@ int cmd_tag(int argc,
 			N_("do not output a newline after empty formatted refs")),
 		OPT_REF_SORT(&sorting_options),
 		{
-			OPTION_CALLBACK, 0, "points-at", &filter.points_at, N_("object"),
-			N_("print only tags of the object"), PARSE_OPT_LASTARG_DEFAULT,
-			parse_opt_object_name, (intptr_t) "HEAD"
+			.type = OPTION_CALLBACK,
+			.long_name = "points-at",
+			.value = &filter.points_at,
+			.argh = N_("object"),
+			.help = N_("print only tags of the object"),
+			.flags = PARSE_OPT_LASTARG_DEFAULT,
+			.callback = parse_opt_object_name,
+			.defval = (intptr_t) "HEAD",
 		},
 		OPT_STRING(  0 , "format", &format.format, N_("format"),
 			   N_("format to use for the output")),
@@ -533,7 +546,7 @@ int cmd_tag(int argc,
 	 * Try to set sort keys from config. If config does not set any,
 	 * fall back on default (refname) sorting.
 	 */
-	git_config(git_tag_config, &sorting_options);
+	repo_config(the_repository, git_tag_config, &sorting_options);
 	if (!sorting_options.nr)
 		string_list_append(&sorting_options, "refname");
 
@@ -554,6 +567,9 @@ int cmd_tag(int argc,
 
 	if (cmdmode == 'l')
 		setup_auto_pager("tag", 1);
+
+	if (trailer_args.nr)
+		trailer_config_init();
 
 	if (opt.sign == -1)
 		opt.sign = cmdmode ? 0 : config_sign_tag > 0;
@@ -667,7 +683,7 @@ int cmd_tag(int argc,
 	if (create_tag_object) {
 		if (force_sign_annotate && !annotate)
 			opt.sign = 1;
-		path = git_pathdup("TAG_EDITMSG");
+		path = repo_git_path(the_repository, "TAG_EDITMSG");
 		create_tag(&object, object_ref, tag, &buf, &opt, &prev, &object,
 			   &trailer_args, path);
 	}

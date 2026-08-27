@@ -223,7 +223,7 @@ int cmd_fetch_pack(int argc,
 		int flags = args.verbose ? CONNECT_VERBOSE : 0;
 		if (args.diag_url)
 			flags |= CONNECT_DIAG_URL;
-		conn = git_connect(fd, dest, "git-upload-pack",
+		conn = git_connect(fd, dest, GIT_CONNECT_UPLOAD_PACK,
 				   args.uploadpack, flags);
 		if (!conn)
 			return args.diag_url ? 0 : 1;
@@ -274,8 +274,10 @@ int cmd_fetch_pack(int argc,
 	}
 	close(fd[0]);
 	close(fd[1]);
-	if (finish_connect(conn))
-		return 1;
+	if (finish_connect(conn)) {
+		ret = 1;
+		goto cleanup;
+	}
 
 	ret = !fetched_refs;
 
@@ -291,6 +293,7 @@ int cmd_fetch_pack(int argc,
 		printf("%s %s\n",
 		       oid_to_hex(&ref->old_oid), ref->name);
 
+cleanup:
 	for (size_t i = 0; i < nr_sought; i++)
 		free_one_ref(sought_to_free[i]);
 	free(sought_to_free);

@@ -1,14 +1,17 @@
 #define USE_THE_REPOSITORY_VARIABLE
 
 #include "test-tool.h"
+#include "dir.h"
 #include "environment.h"
 #include "hex.h"
+#include "list-objects-filter-options.h"
 #include "object-name.h"
 #include "object.h"
 #include "pretty.h"
 #include "revision.h"
 #include "setup.h"
 #include "parse-options.h"
+#include "strbuf.h"
 #include "path-walk.h"
 #include "oid-array.h"
 
@@ -65,10 +68,12 @@ static int emit_block(const char *path, struct oid_array *oids,
 
 int cmd__path_walk(int argc, const char **argv)
 {
-	int res;
+	int res, stdin_pl = 0, pl_sparse_trees = -1;
 	struct rev_info revs = REV_INFO_INIT;
 	struct path_walk_info info = PATH_WALK_INFO_INIT;
 	struct path_walk_test_data data = { 0 };
+	struct list_objects_filter_options filter_options =
+		LIST_OBJECTS_FILTER_INIT;
 	struct option options[] = {
 		OPT_BOOL(0, "blobs", &info.blobs,
 			 N_("toggle inclusion of blob objects")),
@@ -80,11 +85,18 @@ int cmd__path_walk(int argc, const char **argv)
 			 N_("toggle inclusion of tree objects")),
 		OPT_BOOL(0, "prune", &info.prune_all_uninteresting,
 			 N_("toggle pruning of uninteresting paths")),
+		OPT_BOOL(0, "edge-aggressive", &info.edge_aggressive,
+			 N_("toggle aggressive edge walk")),
+		OPT_BOOL(0, "stdin-pl", &stdin_pl,
+			 N_("read a pattern list over stdin")),
+		OPT_BOOL(0, "pl-sparse-trees", &pl_sparse_trees,
+			 N_("toggle pruning of trees by sparse patterns")),
+		OPT_PARSE_LIST_OBJECTS_FILTER(&filter_options),
 		OPT_END(),
 	};
 
-	setup_git_directory();
-	revs.repo = the_repository;
+	setup_git_directory(the_repository);
+	repo_init_revisions(the_repository, &revs, NULL);
 
 	argc = parse_options(argc, argv, NULL,
 			     options, path_walk_usage,
@@ -95,9 +107,26 @@ int cmd__path_walk(int argc, const char **argv)
 	else
 		usage(path_walk_usage[0]);
 
+	/* Apply the filter after setup_revisions to avoid the --objects check. */
+	if (filter_options.choice)
+		list_objects_filter_copy(&revs.filter, &filter_options);
+
 	info.revs = &revs;
 	info.path_fn = emit_block;
 	info.path_fn_data = &data;
+
+	if (stdin_pl) {
+		struct strbuf in = STRBUF_INIT;
+		CALLOC_ARRAY(info.pl, 1);
+		info.pl_sparse_trees = (pl_sparse_trees >= 0) ?
+			pl_sparse_trees : 1;
+
+		info.pl->use_cone_patterns = 1;
+
+		strbuf_fread(&in, 2048, stdin);
+		add_patterns_from_buffer(in.buf, in.len, "", 0, info.pl);
+		strbuf_release(&in);
+	}
 
 	res = walk_objects_by_path(&info);
 
@@ -107,6 +136,12 @@ int cmd__path_walk(int argc, const char **argv)
 	       "tags:%" PRIuMAX "\n",
 	       data.commit_nr, data.tree_nr, data.blob_nr, data.tag_nr);
 
+	if (info.pl) {
+		clear_pattern_list(info.pl);
+		free(info.pl);
+	}
+
+	list_objects_filter_release(&filter_options);
 	release_revisions(&revs);
 	return res;
 }

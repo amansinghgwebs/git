@@ -19,6 +19,7 @@
 #include "environment.h"
 #include "diff.h"
 #include "commit.h"
+#include "add-interactive.h"
 #include "gettext.h"
 #include "revision.h"
 #include "wt-status.h"
@@ -122,6 +123,7 @@ static const char *edit_message, *use_message;
 static char *fixup_message, *fixup_commit, *squash_message;
 static const char *fixup_prefix;
 static int all, also, interactive, patch_interactive, only, amend, signoff;
+static struct interactive_options interactive_opts = INTERACTIVE_OPTIONS_INIT;
 static int edit_flag = -1; /* unspecified */
 static int quiet, verbose, no_verify, allow_empty, dry_run, renew_authorship;
 static int config_commit_verbose = -1; /* unspecified */
@@ -207,9 +209,9 @@ static void status_init_config(struct wt_status *s, config_fn_t fn)
 {
 	wt_status_prepare(the_repository, s);
 	init_diff_ui_defaults();
-	git_config(fn, s);
+	repo_config(the_repository, fn, s);
 	determine_whence(s);
-	s->hints = advice_enabled(ADVICE_STATUS_HINTS); /* must come after git_config() */
+	s->hints = advice_enabled(ADVICE_STATUS_HINTS); /* must come after repo_config() */
 }
 
 static void rollback_index_files(void)
@@ -325,10 +327,11 @@ static void create_base_index(const struct commit *current_head)
 	opts.dst_index = the_repository->index;
 
 	opts.fn = oneway_merge;
-	tree = parse_tree_indirect(&current_head->object.oid);
+	tree = repo_parse_tree_indirect(the_repository,
+					&current_head->object.oid);
 	if (!tree)
 		die(_("failed to unpack HEAD tree object"));
-	if (parse_tree(tree) < 0)
+	if (repo_parse_tree(the_repository, tree) < 0)
 		exit(128);
 	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
 	if (unpack_trees(1, &t, &opts))
@@ -352,6 +355,12 @@ static const char *prepare_index(const char **argv, const char *prefix,
 	struct pathspec pathspec;
 	int refresh_flags = REFRESH_QUIET;
 	const char *ret;
+	char *path = NULL;
+
+	if (interactive_opts.context < -1)
+		die(_("'%s' cannot be negative"), "--unified");
+	if (interactive_opts.interhunkcontext < -1)
+		die(_("'%s' cannot be negative"), "--inter-hunk-context");
 
 	if (is_status)
 		refresh_flags |= REFRESH_UNMERGED;
@@ -399,7 +408,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		old_index_env = xstrdup_or_null(getenv(INDEX_ENVIRONMENT));
 		setenv(INDEX_ENVIRONMENT, the_repository->index_file, 1);
 
-		if (interactive_add(the_repository, argv, prefix, patch_interactive) != 0)
+		if (interactive_add(the_repository, argv, prefix, patch_interactive, &interactive_opts) != 0)
 			die(_("interactive add failed"));
 
 		the_repository->index_file = old_repo_index_file;
@@ -423,6 +432,11 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		commit_style = COMMIT_NORMAL;
 		ret = get_lock_file_path(&index_lock);
 		goto out;
+	} else {
+		if (interactive_opts.context != -1)
+			die(_("the option '%s' requires '%s'"), "--unified", "--interactive/--patch");
+		if (interactive_opts.interhunkcontext != -1)
+			die(_("the option '%s' requires '%s'"), "--inter-hunk-context", "--interactive/--patch");
 	}
 
 	/*
@@ -442,7 +456,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		repo_hold_locked_index(the_repository, &index_lock,
 				       LOCK_DIE_ON_ERROR);
 		add_files_to_cache(the_repository, also ? prefix : NULL,
-				   &pathspec, ps_matched, 0, 0);
+				   &pathspec, ps_matched, 0, 0, 0 );
 		if (!all && report_path_error(ps_matched, &pathspec))
 			exit(128);
 
@@ -524,9 +538,9 @@ static const char *prepare_index(const char **argv, const char *prefix,
 	if (write_locked_index(the_repository->index, &index_lock, 0))
 		die(_("unable to write new index file"));
 
-	hold_lock_file_for_update(&false_lock,
-				  git_path("next-index-%"PRIuMAX,
-					   (uintmax_t) getpid()),
+	path = repo_git_path(the_repository, "next-index-%"PRIuMAX,
+			     (uintmax_t) getpid());
+	hold_lock_file_for_update(&false_lock, path,
 				  LOCK_DIE_ON_ERROR);
 
 	create_base_index(current_head);
@@ -542,6 +556,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 out:
 	string_list_clear(&partial, 0);
 	clear_pathspec(&pathspec);
+	free(path);
 	return ret;
 }
 
@@ -681,11 +696,16 @@ static int author_date_is_interesting(void)
 	return author_message || force_date;
 }
 
+#ifndef WITH_BREAKING_CHANGES
 static void adjust_comment_line_char(const struct strbuf *sb)
 {
 	char candidates[] = "#;@!$%^&|:";
 	char *candidate;
 	const char *p;
+	size_t cutoff;
+
+	/* Ignore comment chars in trailing comments (e.g., Conflicts:) */
+	cutoff = sb->len - ignored_log_message_bytes(sb->buf, sb->len);
 
 	if (!memchr(sb->buf, candidates[0], sb->len)) {
 		free(comment_line_str_to_free);
@@ -698,7 +718,7 @@ static void adjust_comment_line_char(const struct strbuf *sb)
 	candidate = strchr(candidates, *p);
 	if (candidate)
 		*candidate = ' ';
-	for (p = sb->buf; *p; p++) {
+	for (p = sb->buf; p + 1 < sb->buf + cutoff; p++) {
 		if ((p[0] == '\n' || p[0] == '\r') && p[1]) {
 			candidate = strchr(candidates, p[1]);
 			if (candidate)
@@ -714,6 +734,7 @@ static void adjust_comment_line_char(const struct strbuf *sb)
 	free(comment_line_str_to_free);
 	comment_line_str = comment_line_str_to_free = xstrfmt("%c", *p);
 }
+#endif /* !WITH_BREAKING_CHANGES */
 
 static void prepare_amend_commit(struct commit *commit, struct strbuf *sb,
 				struct pretty_print_context *ctx)
@@ -795,7 +816,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 				  logfile);
 		hook_arg1 = "message";
 	} else if (use_message) {
-		char *buffer;
+		const char *buffer;
 		buffer = strstr(use_message_buffer, "\n\n");
 		if (buffer)
 			strbuf_addstr(&sb, skip_blank_lines(buffer + 2));
@@ -910,15 +931,17 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 	if (fwrite(sb.buf, 1, sb.len, s->fp) < sb.len)
 		die_errno(_("could not write commit template"));
 
+#ifndef WITH_BREAKING_CHANGES
 	if (auto_comment_line_char)
 		adjust_comment_line_char(&sb);
+#endif /* !WITH_BREAKING_CHANGES */
 	strbuf_release(&sb);
 
 	/* This checks if committer ident is explicitly given */
 	strbuf_addstr(&committer_ident, git_committer_info(IDENT_STRICT));
 	if (use_editor && include_status) {
 		int ident_shown = 0;
-		int saved_color_setting;
+		enum git_colorbool saved_color_setting;
 		struct ident_split ci, ai;
 		const char *hint_cleanup_all = allow_empty_message ?
 			_("Please enter the commit message for your changes."
@@ -998,7 +1021,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 		status_printf_ln(s, GIT_COLOR_NORMAL, "%s", ""); /* Add new line for clarity */
 
 		saved_color_setting = s->use_color;
-		s->use_color = 0;
+		s->use_color = GIT_COLOR_NEVER;
 		committable = run_status(s->fp, index_file, prefix, 1, s);
 		s->use_color = saved_color_setting;
 		string_list_clear_func(&s->change, change_data_free);
@@ -1020,7 +1043,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 			for (i = 0; i < the_repository->index->cache_nr; i++)
 				if (ce_intent_to_add(the_repository->index->cache[i]))
 					ita_nr++;
-			committable = the_repository->index->cache_nr - ita_nr > 0;
+			committable = the_repository->index->cache_nr > ita_nr;
 		} else {
 			/*
 			 * Unless the user did explicitly request a submodule
@@ -1132,7 +1155,7 @@ static const char *find_author_by_nickname(const char *name)
 	setup_revisions(ac, av, &revs, NULL);
 	revs.mailmap = xmalloc(sizeof(struct string_list));
 	string_list_init_nodup(revs.mailmap);
-	read_mailmap(revs.mailmap);
+	read_mailmap(the_repository, revs.mailmap);
 
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
@@ -1540,17 +1563,34 @@ struct repository *repo UNUSED)
 			    STATUS_FORMAT_LONG),
 		OPT_BOOL('z', "null", &s.null_termination,
 			 N_("terminate entries with NUL")),
-		{ OPTION_STRING, 'u', "untracked-files", &untracked_files_arg,
-		  N_("mode"),
-		  N_("show untracked files, optional modes: all, normal, no. (Default: all)"),
-		  PARSE_OPT_OPTARG, NULL, (intptr_t)"all" },
-		{ OPTION_STRING, 0, "ignored", &ignored_arg,
-		  N_("mode"),
-		  N_("show ignored files, optional modes: traditional, matching, no. (Default: traditional)"),
-		  PARSE_OPT_OPTARG, NULL, (intptr_t)"traditional" },
-		{ OPTION_STRING, 0, "ignore-submodules", &ignore_submodule_arg, N_("when"),
-		  N_("ignore changes to submodules, optional when: all, dirty, untracked. (Default: all)"),
-		  PARSE_OPT_OPTARG, NULL, (intptr_t)"all" },
+		{
+			.type = OPTION_STRING,
+			.short_name = 'u',
+			.long_name = "untracked-files",
+			.value = &untracked_files_arg,
+			.argh = N_("mode"),
+			.help = N_("show untracked files, optional modes: all, normal, no. (Default: all)"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t)"all",
+		},
+		{
+			.type = OPTION_STRING,
+			.long_name = "ignored",
+			.value = &ignored_arg,
+			.argh = N_("mode"),
+			.help = N_("show ignored files, optional modes: traditional, matching, no. (Default: traditional)"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t)"traditional",
+		},
+		{
+			.type = OPTION_STRING,
+			.long_name = "ignore-submodules",
+			.value = &ignore_submodule_arg,
+			.argh = N_("when"),
+			.help = N_("ignore changes to submodules, optional when: all, dirty, untracked. (Default: all)"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t)"all",
+		},
 		OPT_COLUMN(0, "column", &s.colopts, N_("list untracked files in columns")),
 		OPT_BOOL(0, "no-renames", &no_renames, N_("do not detect renames")),
 		OPT_CALLBACK_F('M', "find-renames", &rename_score_arg,
@@ -1680,14 +1720,23 @@ int cmd_commit(int argc,
 		OPT_STRING(0, "fixup", &fixup_message, N_("[(amend|reword):]commit"), N_("use autosquash formatted message to fixup or amend/reword specified commit")),
 		OPT_STRING(0, "squash", &squash_message, N_("commit"), N_("use autosquash formatted message to squash specified commit")),
 		OPT_BOOL(0, "reset-author", &renew_authorship, N_("the commit is authored by me now (used with -C/-c/--amend)")),
-		OPT_PASSTHRU_ARGV(0, "trailer", &trailer_args, N_("trailer"), N_("add custom trailer(s)"), PARSE_OPT_NONEG),
+		OPT_STRVEC(0, "trailer", &trailer_args, N_("trailer"),
+			   N_("add custom trailer(s)")),
 		OPT_BOOL('s', "signoff", &signoff, N_("add a Signed-off-by trailer")),
 		OPT_FILENAME('t', "template", &template_file, N_("use specified template file")),
 		OPT_BOOL('e', "edit", &edit_flag, N_("force edit of commit")),
 		OPT_CLEANUP(&cleanup_arg),
 		OPT_BOOL(0, "status", &include_status, N_("include status in commit message template")),
-		{ OPTION_STRING, 'S', "gpg-sign", &sign_commit, N_("key-id"),
-		  N_("GPG sign commit"), PARSE_OPT_OPTARG, NULL, (intptr_t) "" },
+		{
+			.type = OPTION_STRING,
+			.short_name = 'S',
+			.long_name = "gpg-sign",
+			.value = &sign_commit,
+			.argh = N_("key-id"),
+			.help = N_("GPG sign commit"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t) "",
+		},
 		/* end commit message options */
 
 		OPT_GROUP(N_("Commit contents options")),
@@ -1695,6 +1744,8 @@ int cmd_commit(int argc,
 		OPT_BOOL('i', "include", &also, N_("add specified files to index for commit")),
 		OPT_BOOL(0, "interactive", &interactive, N_("interactively add files")),
 		OPT_BOOL('p', "patch", &patch_interactive, N_("interactively add changes")),
+		OPT_DIFF_UNIFIED(&interactive_opts.context),
+		OPT_DIFF_INTERHUNK_CONTEXT(&interactive_opts.interhunkcontext),
 		OPT_BOOL('o', "only", &only, N_("commit only specified files")),
 		OPT_BOOL('n', "no-verify", &no_verify, N_("bypass pre-commit and commit-msg hooks")),
 		OPT_BOOL(0, "dry-run", &dry_run, N_("show what would be committed")),
@@ -1712,7 +1763,16 @@ int cmd_commit(int argc,
 			 N_("terminate entries with NUL")),
 		OPT_BOOL(0, "amend", &amend, N_("amend previous commit")),
 		OPT_BOOL(0, "no-post-rewrite", &no_post_rewrite, N_("bypass post-rewrite hook")),
-		{ OPTION_STRING, 'u', "untracked-files", &untracked_files_arg, N_("mode"), N_("show untracked files, optional modes: all, normal, no. (Default: all)"), PARSE_OPT_OPTARG, NULL, (intptr_t)"all" },
+		{
+			.type = OPTION_STRING,
+			.short_name = 'u',
+			.long_name = "untracked-files",
+			.value = &untracked_files_arg,
+			.argh = N_("mode"),
+			.help = N_("show untracked files, optional modes: all, normal, no. (Default: all)"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t)"all",
+		},
 		OPT_PATHSPEC_FROM_FILE(&pathspec_from_file),
 		OPT_PATHSPEC_FILE_NUL(&pathspec_file_nul),
 		/* end commit contents options */
@@ -1739,6 +1799,9 @@ int cmd_commit(int argc,
 	show_usage_with_options_if_asked(argc, argv,
 					 builtin_commit_usage, builtin_commit_options);
 
+#ifndef WITH_BREAKING_CHANGES
+	warn_on_auto_comment_char = true;
+#endif /* !WITH_BREAKING_CHANGES */
 	prepare_repo_settings(the_repository);
 	the_repository->settings.command_requires_full_index = 0;
 
@@ -1758,6 +1821,9 @@ int cmd_commit(int argc,
 	argc = parse_and_validate_options(argc, argv, builtin_commit_options,
 					  builtin_commit_usage,
 					  prefix, current_head, &s);
+	if (trailer_args.nr)
+		trailer_config_init();
+
 	if (verbose == -1)
 		verbose = (config_commit_verbose < 0) ? 0 : config_commit_verbose;
 
@@ -1788,7 +1854,7 @@ int cmd_commit(int argc,
 	} else if (amend) {
 		if (!reflog_msg)
 			reflog_msg = "commit (amend)";
-		parents = copy_commit_list(current_head->parents);
+		parents = commit_list_copy(current_head->parents);
 	} else if (whence == FROM_MERGE) {
 		struct strbuf m = STRBUF_INIT;
 		FILE *fp;
@@ -1893,10 +1959,10 @@ int cmd_commit(int argc,
 		      "new index file. Check that disk is not full and quota is\n"
 		      "not exceeded, and then \"git restore --staged :/\" to recover."));
 
-	git_test_write_commit_graph_or_die();
+	git_test_write_commit_graph_or_die(the_repository->objects->sources);
 
 	repo_rerere(the_repository, 0);
-	run_auto_maintenance(quiet);
+	run_auto_maintenance(the_repository, quiet);
 	run_commit_hook(use_editor, repo_get_index_file(the_repository),
 			NULL, "post-commit", NULL);
 	if (amend && !no_post_rewrite) {
@@ -1913,11 +1979,12 @@ int cmd_commit(int argc,
 				     &oid, flags);
 	}
 
-	apply_autostash_ref(the_repository, "MERGE_AUTOSTASH");
+	apply_autostash_ref(the_repository, "MERGE_AUTOSTASH",
+			    NULL, NULL, NULL, NULL);
 
 cleanup:
 	free_commit_extra_headers(extra);
-	free_commit_list(parents);
+	commit_list_free(parents);
 	strbuf_release(&author_ident);
 	strbuf_release(&err);
 	strbuf_release(&sb);

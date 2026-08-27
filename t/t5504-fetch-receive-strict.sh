@@ -64,12 +64,6 @@ test_expect_success 'fetch with transfer.fsckobjects' '
 	)
 '
 
-cat >exp <<EOF
-To dst
-!	refs/heads/main:refs/heads/test	[remote rejected] (missing necessary objects)
-Done
-EOF
-
 test_expect_success 'push without strict' '
 	rm -rf dst &&
 	git init dst &&
@@ -78,6 +72,11 @@ test_expect_success 'push without strict' '
 		git config fetch.fsckobjects false &&
 		git config transfer.fsckobjects false
 	) &&
+	cat >exp <<-\EOF &&
+	To dst
+	!	refs/heads/main:refs/heads/test	[remote rejected] (missing necessary objects)
+	Done
+	EOF
 	test_must_fail git push --porcelain dst main:refs/heads/test >act &&
 	test_cmp exp act
 '
@@ -94,11 +93,6 @@ test_expect_success 'push with !receive.fsckobjects' '
 	test_cmp exp act
 '
 
-cat >exp <<EOF
-To dst
-!	refs/heads/main:refs/heads/test	[remote rejected] (unpacker error)
-EOF
-
 test_expect_success 'push with receive.fsckobjects' '
 	rm -rf dst &&
 	git init dst &&
@@ -107,6 +101,10 @@ test_expect_success 'push with receive.fsckobjects' '
 		git config receive.fsckobjects true &&
 		git config transfer.fsckobjects false
 	) &&
+	cat >exp <<-\EOF &&
+	To dst
+	!	refs/heads/main:refs/heads/test	[remote rejected] (unpacker error)
+	EOF
 	test_must_fail git push --porcelain dst main:refs/heads/test >act &&
 	test_cmp exp act
 '
@@ -129,15 +127,14 @@ test_expect_success 'repair the "corrupt or missing" object' '
 	git fsck
 '
 
-cat >bogus-commit <<EOF
-tree $EMPTY_TREE
-author Bugs Bunny 1234567890 +0000
-committer Bugs Bunny <bugs@bun.ni> 1234567890 +0000
-
-This commit object intentionally broken
-EOF
-
 test_expect_success 'setup bogus commit' '
+	cat >bogus-commit <<-EOF &&
+	tree $EMPTY_TREE
+	author Bugs Bunny 1234567890 +0000
+	committer Bugs Bunny <bugs@bun.ni> 1234567890 +0000
+
+	This commit object intentionally broken
+	EOF
 	commit="$(git hash-object --literally -t commit -w --stdin <bogus-commit)"
 '
 
@@ -301,13 +298,13 @@ test_expect_success 'push with receive.fsck.missingEmail=warn' '
 	git --git-dir=dst/.git config \
 		receive.fsck.missingEmail warn &&
 	git push --porcelain dst bogus >act 2>&1 &&
-	grep "missingEmail" act &&
+	test_grep "missingEmail" act &&
 	test_grep "skipping unknown msg id.*whatever" act &&
 	git --git-dir=dst/.git branch -D bogus &&
 	git --git-dir=dst/.git config --add \
 		receive.fsck.missingEmail ignore &&
 	git push --porcelain dst bogus >act 2>&1 &&
-	! grep "missingEmail" act
+	test_grep ! "missingEmail" act
 '
 
 test_expect_success 'fetch with fetch.fsck.missingEmail=warn' '
@@ -329,7 +326,7 @@ test_expect_success 'fetch with fetch.fsck.missingEmail=warn' '
 	git --git-dir=dst/.git config \
 		fetch.fsck.missingEmail warn &&
 	git --git-dir=dst/.git fetch "file://$(pwd)" $refspec >act 2>&1 &&
-	grep "missingEmail" act &&
+	test_grep "missingEmail" act &&
 	test_grep "Skipping unknown msg id.*whatever" act &&
 	rm -rf dst &&
 	git init dst &&
@@ -337,7 +334,7 @@ test_expect_success 'fetch with fetch.fsck.missingEmail=warn' '
 	git --git-dir=dst/.git config \
 		fetch.fsck.missingEmail ignore &&
 	git --git-dir=dst/.git fetch "file://$(pwd)" $refspec >act 2>&1 &&
-	! grep "missingEmail" act
+	test_grep ! "missingEmail" act
 '
 
 test_expect_success \
@@ -348,7 +345,7 @@ test_expect_success \
 	git --git-dir=dst/.git config \
 		receive.fsck.unterminatedheader warn &&
 	test_must_fail git push --porcelain dst HEAD >act 2>&1 &&
-	grep "Cannot demote unterminatedheader" act
+	test_grep "Cannot demote unterminatedheader" act
 '
 
 test_expect_success \
@@ -359,10 +356,10 @@ test_expect_success \
 	git --git-dir=dst/.git config \
 		fetch.fsck.unterminatedheader warn &&
 	test_must_fail git --git-dir=dst/.git fetch "file://$(pwd)" HEAD &&
-	grep "Cannot demote unterminatedheader" act
+	test_grep "Cannot demote unterminatedheader" act
 '
 
-test_expect_success 'badFilemode is not a strict error' '
+test_expect_success PERL_TEST_HELPERS 'badFilemode is not a strict error' '
 	git init --bare badmode.git &&
 	tree=$(
 		cd badmode.git &&
@@ -376,7 +373,7 @@ test_expect_success 'badFilemode is not a strict error' '
 	git -C dst.git config transfer.fsckObjects true &&
 
 	git -C badmode.git push ../dst.git $tree:refs/tags/tree 2>err &&
-	grep "$tree: badFilemode" err
+	test_grep "$tree: badFilemode" err
 '
 
 test_done

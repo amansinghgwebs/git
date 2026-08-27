@@ -255,7 +255,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 	add_compile_definitions(HAVE_ALLOCA_H NO_POSIX_GOODIES NATIVE_CRLF NO_UNIX_SOCKETS WIN32
 				_CONSOLE DETECT_MSYS_TTY STRIP_EXTENSION=".exe"  NO_SYMLINK_HEAD UNRELIABLE_FSTAT
 				NOGDI OBJECT_CREATION_MODE=1 __USE_MINGW_ANSI_STDIO=0
-				USE_NED_ALLOCATOR OVERRIDE_STRDUP MMAP_PREVENTS_DELETE USE_WIN32_MMAP
+				OVERRIDE_STRDUP MMAP_PREVENTS_DELETE USE_WIN32_MMAP
 				HAVE_WPGMPTR ENSURE_MSYSTEM_IS_SET HAVE_RTLGENRANDOM)
 	list(APPEND compat_SOURCES
 		compat/mingw.c
@@ -267,13 +267,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 		compat/win32/syslog.c
 		compat/win32/trace2_win32_process_info.c
 		compat/win32/dirent.c
-		compat/nedmalloc/nedmalloc.c
 		compat/strdup.c)
 	set(NO_UNIX_SOCKETS 1)
 
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	add_compile_definitions(PROCFS_EXECUTABLE_PATH="/proc/self/exe" HAVE_DEV_TTY )
 	list(APPEND compat_SOURCES unix-socket.c unix-stream-server.c compat/linux/procinfo.c)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	list(APPEND compat_SOURCES compat/darwin/procinfo.c)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -291,23 +292,26 @@ endif()
 
 if(SUPPORTS_SIMPLE_IPC)
 	if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-		add_compile_definitions(HAVE_FSMONITOR_DAEMON_BACKEND)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-listen-win32.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-health-win32.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-ipc-win32.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-path-utils-win32.c)
-
-		add_compile_definitions(HAVE_FSMONITOR_OS_SETTINGS)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-settings-win32.c)
+		set(FSMONITOR_DAEMON_BACKEND "win32")
+		set(FSMONITOR_OS_SETTINGS "win32")
 	elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+		set(FSMONITOR_DAEMON_BACKEND "darwin")
+		set(FSMONITOR_OS_SETTINGS "unix")
+	elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		set(FSMONITOR_DAEMON_BACKEND "linux")
+		set(FSMONITOR_OS_SETTINGS "unix")
+		add_compile_definitions(HAVE_LINUX_MAGIC_H)
+	endif()
+
+	if(FSMONITOR_DAEMON_BACKEND)
 		add_compile_definitions(HAVE_FSMONITOR_DAEMON_BACKEND)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-listen-darwin.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-health-darwin.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-ipc-darwin.c)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-path-utils-darwin.c)
+		list(APPEND compat_SOURCES compat/fsmonitor/fsm-listen-${FSMONITOR_DAEMON_BACKEND}.c)
+		list(APPEND compat_SOURCES compat/fsmonitor/fsm-health-${FSMONITOR_DAEMON_BACKEND}.c)
+		list(APPEND compat_SOURCES compat/fsmonitor/fsm-ipc-${FSMONITOR_OS_SETTINGS}.c)
+		list(APPEND compat_SOURCES compat/fsmonitor/fsm-path-utils-${FSMONITOR_DAEMON_BACKEND}.c)
 
 		add_compile_definitions(HAVE_FSMONITOR_OS_SETTINGS)
-		list(APPEND compat_SOURCES compat/fsmonitor/fsm-settings-darwin.c)
+		list(APPEND compat_SOURCES compat/fsmonitor/fsm-settings-${FSMONITOR_OS_SETTINGS}.c)
 	endif()
 endif()
 
@@ -374,7 +378,7 @@ endif()
 #function checks
 set(function_checks
 	strcasestr memmem strlcpy strtoimax strtoumax strtoull
-	setenv mkdtemp poll pread memmem)
+	setenv mkdtemp poll pread memmem writev)
 
 #unsetenv,hstrerror are incompatible with windows build
 if(NOT WIN32)
@@ -411,16 +415,16 @@ if(NOT HAVE_SETENV)
 	list(APPEND compat_SOURCES compat/setenv.c)
 endif()
 
-if(NOT HAVE_MKDTEMP)
-	list(APPEND compat_SOURCES compat/mkdtemp.c)
-endif()
-
 if(NOT HAVE_PREAD)
 	list(APPEND compat_SOURCES compat/pread.c)
 endif()
 
 if(NOT HAVE_MEMMEM)
 	list(APPEND compat_SOURCES compat/memmem.c)
+endif()
+
+if(NOT HAVE_WRITEV)
+	list(APPEND compat_SOURCES compat/writev.c)
 endif()
 
 if(NOT WIN32)
@@ -638,7 +642,7 @@ set(EXCLUSION_PROGS_CACHE ${EXCLUSION_PROGS} CACHE STRING "Programs not built" F
 if(NOT EXISTS ${CMAKE_BINARY_DIR}/command-list.h OR NOT EXCLUSION_PROGS_CACHE STREQUAL EXCLUSION_PROGS)
 	list(REMOVE_ITEM EXCLUSION_PROGS empty)
 	message("Generating command-list.h")
-	execute_process(COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/generate-cmdlist.sh"
+	execute_process(COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/tools/generate-cmdlist.sh"
 				${EXCLUSION_PROGS}
 				"${CMAKE_SOURCE_DIR}"
 				"${CMAKE_BINARY_DIR}/command-list.h")
@@ -646,14 +650,14 @@ endif()
 
 if(NOT EXISTS ${CMAKE_BINARY_DIR}/config-list.h)
 	message("Generating config-list.h")
-	execute_process(COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/generate-configlist.sh"
+	execute_process(COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/tools/generate-configlist.sh"
 				"${CMAKE_SOURCE_DIR}"
 				"${CMAKE_BINARY_DIR}/config-list.h")
 endif()
 
 if(NOT EXISTS ${CMAKE_BINARY_DIR}/hook-list.h)
 	message("Generating hook-list.h")
-	execute_process(COMMAND "${SH_EXE}" ${CMAKE_SOURCE_DIR}/generate-hooklist.sh
+	execute_process(COMMAND "${SH_EXE}" ${CMAKE_SOURCE_DIR}/tools/generate-hooklist.sh
 				"${CMAKE_SOURCE_DIR}"
 				"${CMAKE_BINARY_DIR}/hook-list.h")
 endif()
@@ -678,18 +682,6 @@ add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/version-def.h"
 list(APPEND libgit_SOURCES "${CMAKE_BINARY_DIR}/version-def.h")
 
 add_library(libgit ${libgit_SOURCES} ${compat_SOURCES})
-
-#libxdiff
-parse_makefile_for_sources(libxdiff_SOURCES ${CMAKE_SOURCE_DIR}/Makefile "XDIFF_OBJS")
-
-list(TRANSFORM libxdiff_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
-add_library(xdiff STATIC ${libxdiff_SOURCES})
-
-#reftable
-parse_makefile_for_sources(reftable_SOURCES ${CMAKE_SOURCE_DIR}/Makefile "REFTABLE_OBJS")
-
-list(TRANSFORM reftable_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
-add_library(reftable STATIC ${reftable_SOURCES})
 
 if(WIN32)
 	add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/git.rc
@@ -720,7 +712,7 @@ endif()
 #link all required libraries to common-main
 add_library(common-main OBJECT ${CMAKE_SOURCE_DIR}/common-main.c)
 
-target_link_libraries(common-main libgit xdiff reftable ${ZLIB_LIBRARIES})
+target_link_libraries(common-main libgit ${ZLIB_LIBRARIES})
 if(Intl_FOUND)
 	target_link_libraries(common-main ${Intl_LIBRARIES})
 endif()
@@ -846,11 +838,11 @@ foreach(script ${git_shell_scripts})
 	endif()
 
 	add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/${shell_gen_path}"
-		COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/generate-script.sh"
+		COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/tools/generate-script.sh"
 			"${CMAKE_SOURCE_DIR}/${script}.sh"
 			"${CMAKE_BINARY_DIR}/${shell_gen_path}"
 			"${CMAKE_BINARY_DIR}/GIT-BUILD-OPTIONS"
-		DEPENDS "${CMAKE_SOURCE_DIR}/generate-script.sh"
+		DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate-script.sh"
 			"${CMAKE_SOURCE_DIR}/${script}.sh"
 		VERBATIM)
 	list(APPEND shell_gen ${CMAKE_BINARY_DIR}/${shell_gen_path})
@@ -889,13 +881,13 @@ foreach(script ${git_perl_scripts} ${perl_modules})
 	file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/${perl_gen_dir}")
 
 	add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/${perl_gen_path}"
-		COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/generate-perl.sh"
+		COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/tools/generate-perl.sh"
 			"${CMAKE_BINARY_DIR}/GIT-BUILD-OPTIONS"
 			"${CMAKE_BINARY_DIR}/GIT-VERSION-FILE"
 			"${CMAKE_BINARY_DIR}/GIT-PERL-HEADER"
 			"${CMAKE_SOURCE_DIR}/${script}"
 			"${CMAKE_BINARY_DIR}/${perl_gen_path}"
-		DEPENDS "${CMAKE_SOURCE_DIR}/generate-perl.sh"
+		DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate-perl.sh"
 			"${CMAKE_SOURCE_DIR}/${script}"
 			"${CMAKE_BINARY_DIR}/GIT-BUILD-OPTIONS"
 			"${CMAKE_BINARY_DIR}/GIT-VERSION-FILE"
@@ -906,11 +898,11 @@ add_custom_target(perl-gen ALL DEPENDS ${perl_gen})
 
 # Python script
 add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/git-p4"
-	COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/generate-python.sh"
+	COMMAND "${SH_EXE}" "${CMAKE_SOURCE_DIR}/tools/generate-python.sh"
 		"${CMAKE_BINARY_DIR}/GIT-BUILD-OPTIONS"
 		"${CMAKE_SOURCE_DIR}/git-p4.py"
 		"${CMAKE_BINARY_DIR}/git-p4"
-	DEPENDS "${CMAKE_SOURCE_DIR}/generate-python.sh"
+	DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate-python.sh"
 		"${CMAKE_SOURCE_DIR}/git-p4.py"
 		"${CMAKE_BINARY_DIR}/GIT-BUILD-OPTIONS"
 	VERBATIM)
@@ -1001,10 +993,16 @@ parse_makefile_for_sources(unit-test_SOURCES ${CMAKE_SOURCE_DIR}/Makefile "UNIT_
 list(TRANSFORM unit-test_SOURCES REPLACE "\\$\\(UNIT_TEST_DIR\\)/" "${CMAKE_SOURCE_DIR}/t/unit-tests/")
 add_library(unit-test-lib STATIC ${unit-test_SOURCES})
 
-parse_makefile_for_scripts(unit_test_PROGRAMS "UNIT_TEST_PROGRAMS" "")
+parse_makefile_for_sources(clar-test_SOURCES ${CMAKE_SOURCE_DIR}/Makefile "CLAR_TEST_OBJS")
+list(TRANSFORM clar-test_SOURCES REPLACE "\\$\\(UNIT_TEST_DIR\\)/" "${CMAKE_SOURCE_DIR}/t/unit-tests/")
+add_library(clar-test-lib STATIC ${clar-test_SOURCES})
+
+file(GLOB unit_test_PROGRAMS "${CMAKE_SOURCE_DIR}/t/unit-tests/t-*.c")
+list(TRANSFORM unit_test_PROGRAMS REPLACE "${CMAKE_SOURCE_DIR}/" "")
+list(TRANSFORM unit_test_PROGRAMS REPLACE ".c" "")
 foreach(unit_test ${unit_test_PROGRAMS})
 	add_executable("${unit_test}" "${CMAKE_SOURCE_DIR}/t/unit-tests/${unit_test}.c")
-	target_link_libraries("${unit_test}" unit-test-lib common-main)
+	target_link_libraries("${unit_test}" unit-test-lib clar-test-lib common-main)
 	set_target_properties("${unit_test}"
 		PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/t/unit-tests/bin)
 	if(MSVC)
@@ -1046,13 +1044,13 @@ add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/t/unit-tests/clar.suite"
 	VERBATIM)
 
 add_library(unit-tests-lib ${clar_test_SUITES}
-	"${CMAKE_SOURCE_DIR}/t/unit-tests/clar/clar.c"
 	"${CMAKE_BINARY_DIR}/t/unit-tests/clar-decls.h"
 	"${CMAKE_BINARY_DIR}/t/unit-tests/clar.suite"
 )
+target_include_directories(clar-test-lib PUBLIC "${CMAKE_BINARY_DIR}/t/unit-tests")
 target_include_directories(unit-tests-lib PUBLIC "${CMAKE_BINARY_DIR}/t/unit-tests")
-add_executable(unit-tests "${CMAKE_SOURCE_DIR}/t/unit-tests/unit-test.c")
-target_link_libraries(unit-tests unit-tests-lib common-main)
+add_executable(unit-tests)
+target_link_libraries(unit-tests unit-tests-lib clar-test-lib common-main)
 set_target_properties(unit-tests
 	PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/t/unit-tests/bin)
 if(MSVC)
@@ -1160,8 +1158,8 @@ endif()
 file(STRINGS ${CMAKE_SOURCE_DIR}/GIT-BUILD-OPTIONS.in git_build_options NEWLINE_CONSUME)
 string(REPLACE "@BROKEN_PATH_FIX@" "" git_build_options "${git_build_options}")
 string(REPLACE "@DIFF@" "'${DIFF}'" git_build_options "${git_build_options}")
-string(REPLACE "@FSMONITOR_DAEMON_BACKEND@" "win32" git_build_options "${git_build_options}")
-string(REPLACE "@FSMONITOR_OS_SETTINGS@" "win32" git_build_options "${git_build_options}")
+string(REPLACE "@FSMONITOR_DAEMON_BACKEND@" "${FSMONITOR_DAEMON_BACKEND}" git_build_options "${git_build_options}")
+string(REPLACE "@FSMONITOR_OS_SETTINGS@" "${FSMONITOR_OS_SETTINGS}" git_build_options "${git_build_options}")
 string(REPLACE "@GITWEBDIR@" "'${GITWEBDIR}'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_INTEROP_MAKE_OPTS@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_PERF_LARGE_REPO@" "" git_build_options "${git_build_options}")
@@ -1169,14 +1167,13 @@ string(REPLACE "@GIT_PERF_MAKE_COMMAND@" "" git_build_options "${git_build_optio
 string(REPLACE "@GIT_PERF_MAKE_OPTS@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_PERF_REPEAT_COUNT@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_PERF_REPO@" "" git_build_options "${git_build_options}")
+string(REPLACE "@GIT_SOURCE_DIR@" "${CMAKE_SOURCE_DIR}" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_CMP@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_CMP_USE_COPIED_CONTEXT@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_GITPERLLIB@" "'${CMAKE_BINARY_DIR}/perl/build/lib'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_INDEX_VERSION@" "" git_build_options "${git_build_options}")
-string(REPLACE "@GIT_TEST_MERGE_TOOLS_DIR@" "'${CMAKE_BINARY_DIR}/mergetools'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_OPTS@" "" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_PERL_FATAL_WARNINGS@" "" git_build_options "${git_build_options}")
-string(REPLACE "@GIT_TEST_POPATH@" "'${CMAKE_BINARY_DIR}/po'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_TEMPLATE_DIR@" "'${CMAKE_BINARY_DIR}/templates/blt'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_TEXTDOMAINDIR@" "'${CMAKE_BINARY_DIR}/po/build/locale'" git_build_options "${git_build_options}")
 string(REPLACE "@GIT_TEST_UTF8_LOCALE@" "" git_build_options "${git_build_options}")
@@ -1205,6 +1202,7 @@ string(REPLACE "@TEST_OUTPUT_DIRECTORY@" "" git_build_options "${git_build_optio
 string(REPLACE "@TEST_SHELL_PATH@" "'${TEST_SHELL_PATH}'" git_build_options "${git_build_options}")
 string(REPLACE "@USE_GETTEXT_SCHEME@" "" git_build_options "${git_build_options}")
 string(REPLACE "@USE_LIBPCRE2@" "" git_build_options "${git_build_options}")
+string(REPLACE "@WITH_BREAKING_CHANGES@" "" git_build_options "${git_build_options}")
 string(REPLACE "@X@" "${EXE_EXTENSION}" git_build_options "${git_build_options}")
 if(USE_VCPKG)
 	string(APPEND git_build_options "PATH=\"$PATH:$TEST_DIRECTORY/../compat/vcbuild/vcpkg/installed/x64-windows/bin\"\n")

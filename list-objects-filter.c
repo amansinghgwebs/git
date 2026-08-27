@@ -12,7 +12,7 @@
 #include "oidmap.h"
 #include "oidset.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 
 /* Remember to update object flag allocation in object.h */
 /*
@@ -244,7 +244,7 @@ static void filter_trees_free(void *filter_data) {
 	struct filter_trees_depth_data *d = filter_data;
 	if (!d)
 		return;
-	oidmap_free(&d->seen_at_depth, 1);
+	oidmap_clear(&d->seen_at_depth, 1);
 	free(d);
 }
 
@@ -280,7 +280,7 @@ static enum list_objects_filter_result filter_blobs_limit(
 	void *filter_data_)
 {
 	struct filter_blobs_limit_data *filter_data = filter_data_;
-	unsigned long object_length;
+	size_t object_length;
 	enum object_type t;
 
 	switch (filter_situation) {
@@ -310,7 +310,7 @@ static enum list_objects_filter_result filter_blobs_limit(
 		assert(obj->type == OBJ_BLOB);
 		assert((obj->flags & SEEN) == 0);
 
-		t = oid_object_info(r, &obj->oid, &object_length);
+		t = odb_read_object_info(r->objects, &obj->oid, &object_length);
 		if (t != OBJ_BLOB) { /* probably OBJ_NONE */
 			/*
 			 * We DO NOT have the blob locally, so we cannot
@@ -524,12 +524,11 @@ static void filter_sparse_oid__init(
 	struct filter *filter)
 {
 	struct filter_sparse_data *d = xcalloc(1, sizeof(*d));
-	struct object_context oc;
 	struct object_id sparse_oid;
 
-	if (get_oid_with_context(the_repository,
-				 filter_options->sparse_oid_name,
-				 GET_OID_BLOB, &sparse_oid, &oc))
+	if (repo_get_oid_with_flags(the_repository,
+				    filter_options->sparse_oid_name,
+				    &sparse_oid, GET_OID_BLOB))
 		die(_("unable to access sparse blob in '%s'"),
 		    filter_options->sparse_oid_name);
 	if (add_patterns_from_blob_to_list(&sparse_oid, "", 0, &d->pl) < 0)
@@ -544,8 +543,6 @@ static void filter_sparse_oid__init(
 	filter->filter_data = d;
 	filter->filter_object_fn = filter_sparse;
 	filter->free_fn = filter_sparse_free;
-
-	object_context_release(&oc);
 }
 
 /*
@@ -748,6 +745,13 @@ static void filter_combine__init(
 	filter->finalize_omits_fn = filter_combine__finalize_omits;
 }
 
+static void filter_auto__init(
+	struct list_objects_filter_options *filter_options UNUSED,
+	struct filter *filter UNUSED)
+{
+	BUG("LOFC_AUTO should have been resolved before initializing the filter");
+}
+
 typedef void (*filter_init_fn)(
 	struct list_objects_filter_options *filter_options,
 	struct filter *filter);
@@ -763,6 +767,7 @@ static filter_init_fn s_filters[] = {
 	filter_sparse_oid__init,
 	filter_object_type__init,
 	filter_combine__init,
+	filter_auto__init,
 };
 
 struct filter *list_objects_filter__init(
@@ -822,4 +827,49 @@ void list_objects_filter__free(struct filter *filter)
 		filter->finalize_omits_fn(filter->omits, filter->filter_data);
 	filter->free_fn(filter->filter_data);
 	free(filter);
+}
+
+/*
+ * NEEDSWORK: this reimplements the blob:limit size check rather than
+ * reusing the existing filter machinery in
+ * list_objects_filter__filter_object(). That machinery is currently
+ * tied to the object-walk path and cannot easily be driven from a
+ * plain oidset. It would be nice to refactor the filter code so this
+ * helper can reuse it instead of duplicating the size check.
+ */
+int list_objects_filter__filter_oidset(struct repository *r,
+	const struct list_objects_filter_options *opts,
+	const struct oidset *in,
+	struct oidset *omitted)
+{
+	struct oidset_iter iter;
+	const struct object_id *oid;
+
+	if (opts->choice != LOFC_BLOB_LIMIT)
+		return error(_("filter_oidset: only blob:limit filters are supported"));
+
+	oidset_iter_init(in, &iter);
+	while ((oid = oidset_iter_next(&iter))) {
+		struct object_info info = OBJECT_INFO_INIT;
+		enum object_type type;
+		size_t size;
+
+		info.typep = &type;
+		info.sizep = &size;
+
+		/*
+		 * Use OBJECT_INFO_SKIP_FETCH_OBJECT to avoid triggering
+		 * a lazy fetch while inspecting candidates for removal.
+		 */
+		if (odb_read_object_info_extended(r->objects, oid, &info,
+				OBJECT_INFO_SKIP_FETCH_OBJECT) < 0)
+			continue;
+
+		if (type != OBJ_BLOB)
+			continue;
+
+		if (size >= opts->blob_limit_value)
+			oidset_insert(omitted, oid);
+	}
+	return 0;
 }

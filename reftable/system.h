@@ -1,17 +1,28 @@
 /*
-Copyright 2020 Google LLC
-
-Use of this source code is governed by a BSD-style
-license that can be found in the LICENSE file or at
-https://developers.google.com/open-source/licenses/bsd
-*/
+ * Copyright 2020 Google LLC
+ *
+ * Use of this source code is governed by a BSD-style
+ * license that can be found in the LICENSE file or at
+ * https://developers.google.com/open-source/licenses/bsd
+ */
 
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
-/* This header glues the reftable library to the rest of Git */
+/*
+ * This header defines the platform-agnostic interface that is to be
+ * implemented by the project to make it work on their respective supported
+ * systems, and to integrate it into the project itself. This header is not
+ * expected to be changed by the individual project.
+ */
 
-#include "git-compat-util.h"
+#include "reftable-system.h"
+
+/*
+ * Return a random 32 bit integer. This function is expected to return
+ * pre-seeded data.
+ */
+uint32_t reftable_rand(void);
 
 /*
  * An implementation-specific temporary file. By making this specific to the
@@ -73,7 +84,9 @@ struct reftable_flock {
  * to acquire the lock. If `timeout_ms` is 0 we don't wait, if it is negative
  * we block indefinitely.
  *
- * Retrun 0 on success, a reftable error code on error.
+ * Return 0 on success, a reftable error code on error. Specifically,
+ * `REFTABLE_LOCK_ERROR` should be returned in case the target path is already
+ * locked.
  */
 int flock_acquire(struct reftable_flock *l, const char *target_path,
 		  long timeout_ms);
@@ -97,5 +110,26 @@ int flock_release(struct reftable_flock *l);
  * reftable error code on error.
  */
 int flock_commit(struct reftable_flock *l);
+
+/* Report the time in milliseconds. */
+uint64_t reftable_time_ms(void);
+
+struct reftable_mmap {
+       void *data;
+       size_t size;
+       void *priv;
+};
+
+/*
+ * Map the file into memory. Returns 0 on success, a reftable error code on
+ * error.
+ */
+int reftable_mmap(struct reftable_mmap *out, int fd, size_t len);
+
+/*
+ * Unmap the file from memory. Returns 0 on success, a reftable error code on
+ * error.
+ */
+int reftable_munmap(struct reftable_mmap *mmap);
 
 #endif

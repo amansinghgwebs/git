@@ -20,8 +20,7 @@ EOF
 generate_random_characters () {
 	LEN=$1
 	NAME=$2
-	test-tool genrandom some-seed $LEN |
-		perl -pe "s/./chr((ord($&) % 26) + ord('a'))/sge" >"$TEST_ROOT/$NAME"
+	test-tool genrandom some-seed | tr -dc 'a-z' | test_copy_bytes "$LEN" >"$TEST_ROOT/$NAME"
 }
 
 filter_git () {
@@ -282,7 +281,7 @@ test_expect_success 'required filter with absent smudge field' '
 test_expect_success 'filtering large input to small output should use little memory' '
 	test_config filter.devnull.clean "cat >/dev/null" &&
 	test_config filter.devnull.required true &&
-	for i in $(test_seq 1 30); do printf "%1048576d" 1 || return 1; done >30MB &&
+	test_seq -f "%1048576d" 1 30 >30MB &&
 	echo "30MB filter=devnull" >.gitattributes &&
 	GIT_MMAP_LIMIT=1m GIT_ALLOC_LIMIT=1m git add 30MB
 '
@@ -297,10 +296,10 @@ test_expect_success 'filter that does not read is fine' '
 	test_cmp expect actual
 '
 
-test_expect_success EXPENSIVE 'filter large file' '
+test_expect_success EXPENSIVE,SIZE_T_IS_64BIT 'filter large file' '
 	test_config filter.largefile.smudge cat &&
 	test_config filter.largefile.clean cat &&
-	for i in $(test_seq 1 2048); do printf "%1048576d" 1 || return 1; done >2GB &&
+	test_seq -f "%1048576d" 1 2048 >2GB &&
 	echo "2GB filter=largefile" >.gitattributes &&
 	git add 2GB 2>err &&
 	test_must_be_empty err &&
@@ -732,7 +731,7 @@ test_expect_success 'process filter should restart after unexpected write failur
 		rm -f debug.log &&
 		git checkout --quiet --no-progress . 2>git-stderr.log &&
 
-		grep "smudge write error" git-stderr.log &&
+		test_grep "smudge write error" git-stderr.log &&
 		test_grep "error: external filter" git-stderr.log &&
 
 		cat >expected.log <<-EOF &&
@@ -841,7 +840,7 @@ test_expect_success 'process filter abort stops processing of all further files'
 	)
 '
 
-test_expect_success PERL 'invalid process filter must fail (and not hang!)' '
+test_expect_success 'invalid process filter must fail (and not hang!)' '
 	test_config_global filter.protocol.process cat &&
 	test_config_global filter.protocol.required true &&
 	rm -rf repo &&
@@ -854,7 +853,24 @@ test_expect_success PERL 'invalid process filter must fail (and not hang!)' '
 
 		cp "$TEST_ROOT/test.o" test.r &&
 		test_must_fail git add . 2>git-stderr.log &&
-		grep "expected git-filter-server" git-stderr.log
+		test_grep "expected git-filter-server" git-stderr.log
+	)
+'
+
+test_expect_success 'missing process filter with space in path does not die' '
+	test_config_global filter.protocol.process "/non existent/tool" &&
+	test_config_global filter.protocol.required true &&
+	rm -rf repo &&
+	mkdir repo &&
+	(
+		cd repo &&
+		git init &&
+
+		echo "*.r filter=protocol" >.gitattributes &&
+
+		cp "$TEST_ROOT/test.o" test.r &&
+		test_must_fail git add . 2>git-stderr.log &&
+		test_grep "clean filter.*protocol.*failed" git-stderr.log
 	)
 '
 
@@ -954,7 +970,7 @@ test_expect_success 'missing file in delayed checkout' '
 
 	rm -rf repo-cloned &&
 	test_must_fail git clone repo repo-cloned 2>git-stderr.log &&
-	grep "error: .missing-delay\.a. was not filtered properly" git-stderr.log
+	test_grep "error: .missing-delay\.a. was not filtered properly" git-stderr.log
 '
 
 test_expect_success 'invalid file in delayed checkout' '
@@ -975,7 +991,7 @@ test_expect_success 'invalid file in delayed checkout' '
 
 	rm -rf repo-cloned &&
 	test_must_fail git clone repo repo-cloned 2>git-stderr.log &&
-	grep "error: external filter .* signaled that .unfiltered. is now available although it has not been delayed earlier" git-stderr.log
+	test_grep "error: external filter .* signaled that .unfiltered. is now available although it has not been delayed earlier" git-stderr.log
 '
 
 for mode in 'case' 'utf-8'
@@ -1016,7 +1032,7 @@ do
 
 		git clone $mode-collision $mode-collision-cloned &&
 		# Make sure z was really delayed
-		grep "IN: smudge $dir/z .* \\[DELAYED\\]" $mode-collision-cloned/delayed.log &&
+		test_grep "IN: smudge $dir/z .* \\[DELAYED\\]" $mode-collision-cloned/delayed.log &&
 
 		# Should not create $dir/z at $symlink/z
 		test_path_is_missing $mode-collision/target-dir/z
@@ -1054,7 +1070,7 @@ test_expect_success SYMLINKS,CASE_INSENSITIVE_FS \
 		git commit -m super &&
 
 		git checkout --recurse-submodules . &&
-		grep "IN: smudge A/B/y .* \\[DELAYED\\]" delayed.log &&
+		test_grep "IN: smudge A/B/y .* \\[DELAYED\\]" delayed.log &&
 		test_path_is_missing target-dir/y
 	)
 '
@@ -1111,19 +1127,19 @@ do
 	branch) opt='-f HEAD' ;;
 	esac
 
-	test_expect_success PERL,TTY "delayed checkout shows progress by default on tty ($mode checkout)" '
+	test_expect_success TTY "delayed checkout shows progress by default on tty ($mode checkout)" '
 		test_delayed_checkout_progress test_terminal git checkout $opt
 	'
 
-	test_expect_success PERL "delayed checkout omits progress on non-tty ($mode checkout)" '
+	test_expect_success "delayed checkout omits progress on non-tty ($mode checkout)" '
 		test_delayed_checkout_progress ! git checkout $opt
 	'
 
-	test_expect_success PERL,TTY "delayed checkout omits progress with --quiet ($mode checkout)" '
+	test_expect_success TTY "delayed checkout omits progress with --quiet ($mode checkout)" '
 		test_delayed_checkout_progress ! test_terminal git checkout --quiet $opt
 	'
 
-	test_expect_success PERL,TTY "delayed checkout honors --[no]-progress ($mode checkout)" '
+	test_expect_success TTY "delayed checkout honors --[no]-progress ($mode checkout)" '
 		test_delayed_checkout_progress ! test_terminal git checkout --no-progress $opt &&
 		test_delayed_checkout_progress test_terminal git checkout --quiet --progress $opt
 	'
@@ -1145,9 +1161,9 @@ test_expect_success 'delayed checkout correctly reports the number of updated en
 
 		rm *.a &&
 		git checkout . 2>err &&
-		grep "IN: smudge test-delay10.a .* \\[DELAYED\\]" delayed.log &&
-		grep "IN: smudge test-delay11.a .* \\[DELAYED\\]" delayed.log &&
-		grep "Updated 2 paths from the index" err
+		test_grep "IN: smudge test-delay10.a .* \\[DELAYED\\]" delayed.log &&
+		test_grep "IN: smudge test-delay11.a .* \\[DELAYED\\]" delayed.log &&
+		test_grep "Updated 2 paths from the index" err
 	)
 '
 

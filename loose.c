@@ -1,7 +1,9 @@
 #include "git-compat-util.h"
 #include "hash.h"
 #include "path.h"
-#include "object-store.h"
+#include "object-file.h"
+#include "odb.h"
+#include "odb/source-files.h"
 #include "hex.h"
 #include "repository.h"
 #include "wrapper.h"
@@ -44,45 +46,50 @@ static int insert_oid_pair(kh_oid_map_t *map, const struct object_id *key, const
 	return 1;
 }
 
-static int insert_loose_map(struct object_directory *odb,
+static int insert_loose_map(struct odb_source_loose *loose,
 			    const struct object_id *oid,
 			    const struct object_id *compat_oid)
 {
-	struct loose_object_map *map = odb->loose_map;
+	struct loose_object_map *map = loose->map;
 	int inserted = 0;
 
 	inserted |= insert_oid_pair(map->to_compat, oid, compat_oid);
 	inserted |= insert_oid_pair(map->to_storage, compat_oid, oid);
 	if (inserted)
-		oidtree_insert(odb->loose_objects_cache, compat_oid);
+		oidtree_insert(loose->cache, compat_oid, NULL);
 
 	return inserted;
 }
 
-static int load_one_loose_object_map(struct repository *repo, struct object_directory *dir)
+int loose_object_map_load(struct odb_source_loose *loose)
 {
-	struct strbuf buf = STRBUF_INIT, path = STRBUF_INIT;
+	struct repository *repo = loose->base.odb->repo;
+	struct strbuf buf = STRBUF_INIT;
+	char *path;
 	FILE *fp;
+	int ret = -1;
 
-	if (!dir->loose_map)
-		loose_object_map_init(&dir->loose_map);
-	if (!dir->loose_objects_cache) {
-		ALLOC_ARRAY(dir->loose_objects_cache, 1);
-		oidtree_init(dir->loose_objects_cache);
+	if (!should_use_loose_object_map(repo))
+		return 0;
+
+	if (!loose->map)
+		loose_object_map_init(&loose->map);
+	if (!loose->cache) {
+		ALLOC_ARRAY(loose->cache, 1);
+		oidtree_init(loose->cache);
 	}
 
-	insert_loose_map(dir, repo->hash_algo->empty_tree, repo->compat_hash_algo->empty_tree);
-	insert_loose_map(dir, repo->hash_algo->empty_blob, repo->compat_hash_algo->empty_blob);
-	insert_loose_map(dir, repo->hash_algo->null_oid, repo->compat_hash_algo->null_oid);
+	insert_loose_map(loose, repo->hash_algo->empty_tree, repo->compat_hash_algo->empty_tree);
+	insert_loose_map(loose, repo->hash_algo->empty_blob, repo->compat_hash_algo->empty_blob);
+	insert_loose_map(loose, repo->hash_algo->null_oid, repo->compat_hash_algo->null_oid);
 
-	strbuf_git_common_path(&path, repo, "objects/loose-object-idx");
-	fp = fopen(path.buf, "rb");
+	path = xstrfmt("%s/loose-object-idx", loose->base.path);
+	fp = fopen(path, "rb");
 	if (!fp) {
-		strbuf_release(&path);
+		free(path);
 		return 0;
 	}
 
-	errno = 0;
 	if (strbuf_getwholeline(&buf, fp, '\n') || strcmp(buf.buf, loose_object_header))
 		goto err;
 	while (!strbuf_getline_lf(&buf, fp)) {
@@ -93,38 +100,35 @@ static int load_one_loose_object_map(struct repository *repo, struct object_dire
 		    parse_oid_hex_algop(p, &compat_oid, &p, repo->compat_hash_algo) ||
 		    p != buf.buf + buf.len)
 			goto err;
-		insert_loose_map(dir, &oid, &compat_oid);
+		insert_loose_map(loose, &oid, &compat_oid);
 	}
 
-	strbuf_release(&buf);
-	strbuf_release(&path);
-	return errno ? -1 : 0;
+	ret = ferror(fp) ? -1 : 0;
 err:
+	fclose(fp);
 	strbuf_release(&buf);
-	strbuf_release(&path);
-	return -1;
+	free(path);
+	return ret;
 }
 
 int repo_read_loose_object_map(struct repository *repo)
 {
-	struct object_directory *dir;
+	struct odb_source *source;
 
-	if (!should_use_loose_object_map(repo))
-		return 0;
-
-	prepare_alt_odb(repo);
-
-	for (dir = repo->objects->odb; dir; dir = dir->next) {
-		if (load_one_loose_object_map(repo, dir) < 0) {
+	odb_prepare_alternates(repo->objects);
+	for (source = repo->objects->sources; source; source = source->next) {
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		if (loose_object_map_load(files->loose) < 0)
 			return -1;
-		}
 	}
+
 	return 0;
 }
 
 int repo_write_loose_object_map(struct repository *repo)
 {
-	kh_oid_map_t *map = repo->objects->odb->loose_map->to_compat;
+	struct odb_source_files *files = odb_source_files_downcast(repo->objects->sources);
+	kh_oid_map_t *map = files->loose->map->to_compat;
 	struct lock_file lock;
 	int fd;
 	khiter_t iter;
@@ -133,8 +137,9 @@ int repo_write_loose_object_map(struct repository *repo)
 	if (!should_use_loose_object_map(repo))
 		return 0;
 
-	strbuf_git_common_path(&path, repo, "objects/loose-object-idx");
-	fd = hold_lock_file_for_update_timeout(&lock, path.buf, LOCK_DIE_ON_ERROR, -1);
+	repo_common_path_replace(repo, &path, "objects/loose-object-idx");
+	fd = repo_hold_lock_file_for_update_timeout(repo, &lock, path.buf,
+						    LOCK_DIE_ON_ERROR, -1);
 	iter = kh_begin(map);
 	if (write_in_full(fd, loose_object_header, strlen(loose_object_header)) < 0)
 		goto errout;
@@ -166,7 +171,8 @@ errout:
 	return -1;
 }
 
-static int write_one_object(struct repository *repo, const struct object_id *oid,
+static int write_one_object(struct odb_source_loose *loose,
+			    const struct object_id *oid,
 			    const struct object_id *compat_oid)
 {
 	struct lock_file lock;
@@ -174,8 +180,9 @@ static int write_one_object(struct repository *repo, const struct object_id *oid
 	struct stat st;
 	struct strbuf buf = STRBUF_INIT, path = STRBUF_INIT;
 
-	strbuf_git_common_path(&path, repo, "objects/loose-object-idx");
-	hold_lock_file_for_update_timeout(&lock, path.buf, LOCK_DIE_ON_ERROR, -1);
+	strbuf_addf(&path, "%s/loose-object-idx", loose->base.path);
+	repo_hold_lock_file_for_update_timeout(loose->base.odb->repo, &lock,
+					       path.buf, LOCK_DIE_ON_ERROR, -1);
 
 	fd = open(path.buf, O_WRONLY | O_CREAT | O_APPEND, 0666);
 	if (fd < 0)
@@ -190,31 +197,33 @@ static int write_one_object(struct repository *repo, const struct object_id *oid
 		goto errout;
 	if (close(fd))
 		goto errout;
-	adjust_shared_perm(path.buf);
+	adjust_shared_perm(loose->base.odb->repo, path.buf);
 	rollback_lock_file(&lock);
 	strbuf_release(&buf);
 	strbuf_release(&path);
 	return 0;
 errout:
 	error_errno(_("failed to write loose object index %s"), path.buf);
-	close(fd);
+	if (fd >= 0)
+		close(fd);
 	rollback_lock_file(&lock);
 	strbuf_release(&buf);
 	strbuf_release(&path);
 	return -1;
 }
 
-int repo_add_loose_object_map(struct repository *repo, const struct object_id *oid,
+int repo_add_loose_object_map(struct odb_source_loose *loose,
+			      const struct object_id *oid,
 			      const struct object_id *compat_oid)
 {
 	int inserted = 0;
 
-	if (!should_use_loose_object_map(repo))
+	if (!should_use_loose_object_map(loose->base.odb->repo))
 		return 0;
 
-	inserted = insert_loose_map(repo->objects->odb, oid, compat_oid);
+	inserted = insert_loose_map(loose, oid, compat_oid);
 	if (inserted)
-		return write_one_object(repo, oid, compat_oid);
+		return write_one_object(loose, oid, compat_oid);
 	return 0;
 }
 
@@ -223,12 +232,13 @@ int repo_loose_object_map_oid(struct repository *repo,
 			      const struct git_hash_algo *to,
 			      struct object_id *dest)
 {
-	struct object_directory *dir;
+	struct odb_source *source;
 	kh_oid_map_t *map;
 	khiter_t pos;
 
-	for (dir = repo->objects->odb; dir; dir = dir->next) {
-		struct loose_object_map *loose_map = dir->loose_map;
+	for (source = repo->objects->sources; source; source = source->next) {
+		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct loose_object_map *loose_map = files->loose->map;
 		if (!loose_map)
 			continue;
 		map = (to == repo->compat_hash_algo) ?

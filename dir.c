@@ -18,7 +18,6 @@
 #include "gettext.h"
 #include "name-hash.h"
 #include "object-file.h"
-#include "object-store-ll.h"
 #include "path.h"
 #include "refs.h"
 #include "repository.h"
@@ -31,6 +30,7 @@
 #include "read-cache-ll.h"
 #include "setup.h"
 #include "sparse-index.h"
+#include "strbuf.h"
 #include "submodule-config.h"
 #include "symlinks.h"
 #include "trace2.h"
@@ -88,6 +88,33 @@ struct dirent *readdir_skip_dot_and_dotdot(DIR *dirp)
 	return e;
 }
 
+int for_each_file_in_dir(struct strbuf *path, file_iterator fn, const void *data)
+{
+	struct dirent *e;
+	int res = 0;
+	size_t baselen = path->len;
+	DIR *dir = opendir(path->buf);
+
+	if (!dir)
+		return 0;
+
+	while (!res && (e = readdir_skip_dot_and_dotdot(dir)) != NULL) {
+		unsigned char dtype = get_dtype(e, path, 0);
+		strbuf_setlen(path, baselen);
+		strbuf_addstr(path, e->d_name);
+
+		if (dtype == DT_REG) {
+			res = fn(path->buf, data);
+		} else if (dtype == DT_DIR) {
+			strbuf_addch(path, '/');
+			res = for_each_file_in_dir(path, fn, data);
+		}
+	}
+
+	closedir(dir);
+	return res;
+}
+
 int count_slashes(const char *s)
 {
 	int cnt = 0;
@@ -99,7 +126,7 @@ int count_slashes(const char *s)
 
 int git_fspathcmp(const char *a, const char *b)
 {
-	return ignore_case ? strcasecmp(a, b) : strcmp(a, b);
+	return repo_ignore_case(the_repository) ? strcasecmp(a, b) : strcmp(a, b);
 }
 
 int fspatheq(const char *a, const char *b)
@@ -109,7 +136,7 @@ int fspatheq(const char *a, const char *b)
 
 int git_fspathncmp(const char *a, const char *b, size_t count)
 {
-	return ignore_case ? strncasecmp(a, b, count) : strncmp(a, b, count);
+	return repo_ignore_case(the_repository) ? strncasecmp(a, b, count) : strncmp(a, b, count);
 }
 
 int paths_collide(const char *a, const char *b)
@@ -126,7 +153,7 @@ int paths_collide(const char *a, const char *b)
 
 unsigned int fspathhash(const char *str)
 {
-	return ignore_case ? strihash(str) : strhash(str);
+	return repo_ignore_case(the_repository) ? strihash(str) : strhash(str);
 }
 
 int git_fnmatch(const struct pathspec_item *item,
@@ -175,7 +202,7 @@ static int fnmatch_icase_mem(const char *pattern, int patternlen,
 		use_str = str_buf.buf;
 	}
 
-	if (ignore_case)
+	if (repo_ignore_case(the_repository))
 		flags |= WM_CASEFOLD;
 	match_status = wildmatch(use_pat, use_str, flags);
 
@@ -278,7 +305,7 @@ int within_depth(const char *name, int namelen,
 		if (depth > max_depth)
 			return 0;
 	}
-	return 1;
+	return depth <= max_depth;
 }
 
 /*
@@ -297,13 +324,13 @@ static int do_read_blob(const struct object_id *oid, struct oid_stat *oid_stat,
 			size_t *size_out, char **data_out)
 {
 	enum object_type type;
-	unsigned long sz;
+	size_t sz;
 	char *data;
 
 	*size_out = 0;
 	*data_out = NULL;
 
-	data = repo_read_object_file(the_repository, oid, &type, &sz);
+	data = odb_read_object(the_repository->objects, oid, &type, &sz);
 	if (!data || type != OBJ_BLOB) {
 		free(data);
 		return -1;
@@ -398,9 +425,12 @@ static int match_pathspec_item(struct index_state *istate,
 	    strncmp(item->match, name - prefix, item->prefix))
 		return 0;
 
-	if (item->attr_match_nr &&
-	    !match_pathspec_attrs(istate, name - prefix, namelen + prefix, item))
-		return 0;
+	if (item->attr_match_nr) {
+		if (!istate)
+			BUG("magic PATHSPEC_ATTR requires an index");
+		if (!match_pathspec_attrs(istate, name - prefix, namelen + prefix, item))
+			return 0;
+	}
 
 	/* If the match was just the prefix, we matched */
 	if (!*match)
@@ -519,7 +549,8 @@ static int do_match_pathspec(struct index_state *istate,
 		    ( exclude && !(ps->items[i].magic & PATHSPEC_EXCLUDE)))
 			continue;
 
-		if (seen && seen[i] == MATCHED_EXACTLY)
+		if (seen && seen[i] == MATCHED_EXACTLY &&
+		    ps->items[i].nowildcard_len == ps->items[i].len)
 			continue;
 		/*
 		 * Make exclude patterns optional and never report
@@ -573,6 +604,16 @@ int match_pathspec(struct index_state *istate,
 		   int prefix, char *seen, int is_dir)
 {
 	unsigned flags = is_dir ? DO_MATCH_DIRECTORY : 0;
+	return match_pathspec_with_flags(istate, ps, name, namelen,
+					 prefix, seen, flags);
+}
+
+int match_leading_pathspec(struct index_state *istate,
+			   const struct pathspec *ps,
+			   const char *name, int namelen,
+			   int prefix, char *seen, int is_dir)
+{
+	unsigned flags = is_dir ? DO_MATCH_DIRECTORY | DO_MATCH_LEADING_PATHSPEC : 0;
 	return match_pathspec_with_flags(istate, ps, name, namelen,
 					 prefix, seen, flags);
 }
@@ -1093,10 +1134,6 @@ static void invalidate_directory(struct untracked_cache *uc,
 		dir->dirs[i]->recurse = 0;
 }
 
-static int add_patterns_from_buffer(char *buf, size_t size,
-				    const char *base, int baselen,
-				    struct pattern_list *pl);
-
 /* Flags for add_patterns() */
 #define PATTERN_NOFOLLOW (1<<0)
 
@@ -1186,9 +1223,9 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 	return 0;
 }
 
-static int add_patterns_from_buffer(char *buf, size_t size,
-				    const char *base, int baselen,
-				    struct pattern_list *pl)
+int add_patterns_from_buffer(char *buf, size_t size,
+			     const char *base, int baselen,
+			     struct pattern_list *pl)
 {
 	char *orig = buf;
 	int i, lineno = 1;
@@ -1351,18 +1388,25 @@ int match_pathname(const char *pathname, int pathlen,
 
 		if (fspathncmp(pattern, name, prefix))
 			return 0;
-		pattern += prefix;
-		patternlen -= prefix;
-		name    += prefix;
-		namelen -= prefix;
 
 		/*
 		 * If the whole pattern did not have a wildcard,
 		 * then our prefix match is all we need; we
 		 * do not need to call fnmatch at all.
 		 */
-		if (!patternlen && !namelen)
+		if (patternlen == prefix && namelen == prefix)
 			return 1;
+
+		/*
+		 * Retain one character of the prefix to
+		 * pass to fnmatch, which lets it distinguish
+		 * the start of a directory component correctly.
+		 */
+		prefix--;
+		pattern += prefix;
+		patternlen -= prefix;
+		name    += prefix;
+		namelen -= prefix;
 	}
 
 	return fnmatch_icase_mem(pattern, patternlen,
@@ -1507,7 +1551,9 @@ done:
 
 int init_sparse_checkout_patterns(struct index_state *istate)
 {
-	if (!core_apply_sparse_checkout)
+	struct repo_config_values *cfg = repo_config_values(the_repository);
+
+	if (!cfg->apply_sparse_checkout)
 		return 1;
 	if (istate->sparse_checkout_patterns)
 		return 0;
@@ -1805,7 +1851,7 @@ static struct dir_entry *dir_add_name(struct dir_struct *dir,
 				      struct index_state *istate,
 				      const char *pathname, int len)
 {
-	if (index_file_exists(istate, pathname, len, ignore_case))
+	if (index_file_exists(istate, pathname, len, repo_ignore_case(the_repository)))
 		return NULL;
 
 	ALLOC_GROW(dir->entries, dir->nr+1, dir->internal.alloc);
@@ -1842,7 +1888,7 @@ static enum exist_status directory_exists_in_index_icase(struct index_state *ist
 	if (index_dir_exists(istate, dirname, len))
 		return index_directory;
 
-	ce = index_file_exists(istate, dirname, len, ignore_case);
+	ce = index_file_exists(istate, dirname, len, repo_ignore_case(the_repository));
 	if (ce && S_ISGITLINK(ce->ce_mode))
 		return index_gitdir;
 
@@ -1861,7 +1907,7 @@ static enum exist_status directory_exists_in_index(struct index_state *istate,
 {
 	int pos;
 
-	if (ignore_case)
+	if (repo_ignore_case(the_repository))
 		return directory_exists_in_index_icase(istate, dirname, len);
 
 	pos = index_name_pos(istate, dirname, len);
@@ -2401,7 +2447,7 @@ static enum path_treatment treat_path(struct dir_struct *dir,
 
 	/* Always exclude indexed files */
 	has_path_in_index = !!index_file_exists(istate, path->buf, path->len,
-						ignore_case);
+						repo_ignore_case(the_repository));
 	if (dtype != DT_DIR && has_path_in_index)
 		return path_none;
 
@@ -2939,7 +2985,7 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 
 	/*
-	 * We only support $GIT_DIR/info/exclude and core.excludesfile
+	 * We only support $GIT_COMMON_DIR/info/exclude and core.excludesfile
 	 * as the global ignore rule files. Any other additions
 	 * (e.g. from command line) invalidate the cache. This
 	 * condition also catches running setup_standard_excludes()
@@ -3032,7 +3078,7 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		istate->cache_changed |= UNTRACKED_CHANGED;
 	}
 
-	/* Validate $GIT_DIR/info/exclude and core.excludesfile */
+	/* Validate $GIT_COMMON_DIR/info/exclude and core.excludesfile */
 	root = dir->untracked->root;
 	if (!oideq(&dir->internal.ss_info_exclude.oid,
 		   &dir->untracked->ss_info_exclude.oid)) {
@@ -3155,7 +3201,7 @@ static int cmp_icase(char a, char b)
 {
 	if (a == b)
 		return 0;
-	if (ignore_case)
+	if (repo_ignore_case(the_repository))
 		return toupper(a) - toupper(b);
 	return a - b;
 }
@@ -3435,11 +3481,11 @@ static GIT_PATH_FUNC(git_path_info_exclude, "info/exclude")
 
 void setup_standard_excludes(struct dir_struct *dir)
 {
+	const char *excludes_file = repo_excludes_file(the_repository);
+
 	dir->exclude_per_dir = ".gitignore";
 
 	/* core.excludesfile defaulting to $XDG_CONFIG_HOME/git/ignore */
-	if (!excludes_file)
-		excludes_file = xdg_config_home("ignore");
 	if (excludes_file && !access_or_warn(excludes_file, R_OK, 0))
 		add_patterns_from_file_1(dir, excludes_file,
 					 dir->untracked ? &dir->internal.ss_excludes_file : NULL);
@@ -3455,15 +3501,16 @@ void setup_standard_excludes(struct dir_struct *dir)
 
 char *get_sparse_checkout_filename(void)
 {
-	return git_pathdup("info/sparse-checkout");
+	return repo_git_path(the_repository, "info/sparse-checkout");
 }
 
 int get_sparse_checkout_patterns(struct pattern_list *pl)
 {
 	int res;
 	char *sparse_filename = get_sparse_checkout_filename();
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
-	pl->use_cone_patterns = core_sparse_checkout_cone;
+	pl->use_cone_patterns = cfg->core_sparse_checkout_cone;
 	res = add_patterns_from_file_to_list(sparse_filename, "", 0, pl, NULL, 0);
 
 	free(sparse_filename);
@@ -3472,15 +3519,15 @@ int get_sparse_checkout_patterns(struct pattern_list *pl)
 
 int remove_path(const char *name)
 {
-	char *slash;
+	const char *last;
 
 	if (unlink(name) && !is_missing_file_error(errno))
 		return -1;
 
-	slash = strrchr(name, '/');
-	if (slash) {
+	last = strrchr(name, '/');
+	if (last) {
 		char *dirs = xstrdup(name);
-		slash = dirs + (slash - name);
+		char *slash = dirs + (last - name);
 		do {
 			*slash = '\0';
 			if (startup_info->original_cwd &&
@@ -3570,7 +3617,8 @@ static void write_one_dir(struct untracked_cache_dir *untracked,
 	struct stat_data stat_data;
 	struct strbuf *out = &wd->out;
 	unsigned char intbuf[16];
-	unsigned int intlen, value;
+	unsigned int value;
+	uint8_t intlen;
 	int i = wd->index++;
 
 	/*
@@ -3623,7 +3671,7 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 	struct ondisk_untracked_cache *ouc;
 	struct write_data wd;
 	unsigned char varbuf[16];
-	int varint_len;
+	uint8_t varint_len;
 	const unsigned hashsz = the_hash_algo->rawsz;
 
 	CALLOC_ARRAY(ouc, 1);
@@ -3729,7 +3777,7 @@ static int read_one_dir(struct untracked_cache_dir **untracked_,
 	struct untracked_cache_dir ud, *untracked;
 	const unsigned char *data = rd->data, *end = rd->end;
 	const unsigned char *eos;
-	unsigned int value;
+	uint64_t value;
 	int i;
 
 	memset(&ud, 0, sizeof(ud));
@@ -3744,13 +3792,18 @@ static int read_one_dir(struct untracked_cache_dir **untracked_,
 		ALLOC_ARRAY(ud.untracked, ud.untracked_nr);
 
 	ud.dirs_alloc = ud.dirs_nr = decode_varint(&data);
-	if (data > end)
+	if (data > end) {
+		free(ud.untracked);
 		return -1;
+	}
 	ALLOC_ARRAY(ud.dirs, ud.dirs_nr);
 
 	eos = memchr(data, '\0', end - data);
-	if (!eos || eos == end)
+	if (!eos || eos == end) {
+		free(ud.untracked);
+		free(ud.dirs);
 		return -1;
+	}
 
 	*untracked_ = untracked = xmalloc(st_add3(sizeof(*untracked), eos - data, 1));
 	memcpy(untracked, &ud, sizeof(ud));
@@ -3821,7 +3874,8 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	struct read_data rd;
 	const unsigned char *next = data, *end = (const unsigned char *)data + sz;
 	const char *ident;
-	int ident_len;
+	uint64_t ident_len;
+	uint64_t varint_len;
 	ssize_t len;
 	const char *exclude_per_dir;
 	const unsigned hashsz = the_hash_algo->rawsz;
@@ -3858,8 +3912,8 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	if (next >= end)
 		goto done2;
 
-	len = decode_varint(&next);
-	if (next > end || len == 0)
+	varint_len = decode_varint(&next);
+	if (next > end || varint_len == 0)
 		goto done2;
 
 	rd.valid      = ewah_new();
@@ -3868,9 +3922,9 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	rd.data	      = next;
 	rd.end	      = end;
 	rd.index      = 0;
-	ALLOC_ARRAY(rd.ucd, len);
+	ALLOC_ARRAY(rd.ucd, varint_len);
 
-	if (read_one_dir(&uc->root, &rd) || rd.index != len)
+	if (read_one_dir(&uc->root, &rd) || rd.index != varint_len)
 		goto done;
 
 	next = rd.data;
@@ -4039,7 +4093,7 @@ static void connect_wt_gitdir_in_nested(const char *sub_worktree,
 			 */
 			i++;
 
-		sub = submodule_from_path(&subrepo, null_oid(), ce->name);
+		sub = submodule_from_path(&subrepo, null_oid(the_hash_algo), ce->name);
 		if (!sub || !is_submodule_active(&subrepo, ce->name))
 			/* .gitmodules broken or inactive sub */
 			continue;
@@ -4067,12 +4121,12 @@ void connect_work_tree_and_git_dir(const char *work_tree_,
 
 	/* Prepare .git file */
 	strbuf_addf(&gitfile_sb, "%s/.git", work_tree_);
-	if (safe_create_leading_directories_const(gitfile_sb.buf))
+	if (safe_create_leading_directories_const(the_repository, gitfile_sb.buf))
 		die(_("could not create directories for %s"), gitfile_sb.buf);
 
 	/* Prepare config file */
 	strbuf_addf(&cfg_sb, "%s/config", git_dir_);
-	if (safe_create_leading_directories_const(cfg_sb.buf))
+	if (safe_create_leading_directories_const(the_repository, cfg_sb.buf))
 		die(_("could not create directories for %s"), cfg_sb.buf);
 
 	git_dir = real_pathdup(git_dir_, 1);
@@ -4082,8 +4136,8 @@ void connect_work_tree_and_git_dir(const char *work_tree_,
 	write_file(gitfile_sb.buf, "gitdir: %s",
 		   relative_path(git_dir, work_tree, &rel_path));
 	/* Update core.worktree setting */
-	git_config_set_in_file(cfg_sb.buf, "core.worktree",
-			       relative_path(work_tree, git_dir, &rel_path));
+	repo_config_set_in_file(the_repository, cfg_sb.buf, "core.worktree",
+				relative_path(work_tree, git_dir, &rel_path));
 
 	strbuf_release(&gitfile_sb);
 	strbuf_release(&cfg_sb);

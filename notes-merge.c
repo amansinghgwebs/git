@@ -8,7 +8,7 @@
 #include "refs.h"
 #include "object-file.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "path.h"
 #include "repository.h"
 #include "diff.h"
@@ -275,42 +275,46 @@ static void diff_tree_local(struct notes_merge_options *o,
 
 static void check_notes_merge_worktree(struct notes_merge_options *o)
 {
+	struct strbuf buf = STRBUF_INIT;
+
 	if (!o->has_worktree) {
 		/*
 		 * Must establish NOTES_MERGE_WORKTREE.
 		 * Abort if NOTES_MERGE_WORKTREE already exists
 		 */
-		if (file_exists(git_path(NOTES_MERGE_WORKTREE)) &&
-		    !is_empty_dir(git_path(NOTES_MERGE_WORKTREE))) {
+		if (file_exists(repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE)) &&
+		    !is_empty_dir(repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE))) {
 			if (advice_enabled(ADVICE_RESOLVE_CONFLICT))
 				die(_("You have not concluded your previous "
 				    "notes merge (%s exists).\nPlease, use "
 				    "'git notes merge --commit' or 'git notes "
 				    "merge --abort' to commit/abort the "
 				    "previous merge before you start a new "
-				    "notes merge."), git_path("NOTES_MERGE_*"));
+				    "notes merge."), repo_git_path_replace(the_repository, &buf, "NOTES_MERGE_*"));
 			else
 				die(_("You have not concluded your notes merge "
-				    "(%s exists)."), git_path("NOTES_MERGE_*"));
+				    "(%s exists)."), repo_git_path_replace(the_repository, &buf, "NOTES_MERGE_*"));
 		}
 
-		if (safe_create_leading_directories_const(git_path(
+		if (safe_create_leading_directories_const(the_repository, repo_git_path_replace(the_repository, &buf,
 				NOTES_MERGE_WORKTREE "/.test")))
 			die_errno("unable to create directory %s",
-				  git_path(NOTES_MERGE_WORKTREE));
+				  repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE));
 		o->has_worktree = 1;
-	} else if (!file_exists(git_path(NOTES_MERGE_WORKTREE)))
+	} else if (!file_exists(repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE)))
 		/* NOTES_MERGE_WORKTREE should already be established */
 		die("missing '%s'. This should not happen",
-		    git_path(NOTES_MERGE_WORKTREE));
+		    repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE));
+
+	strbuf_release(&buf);
 }
 
 static void write_buf_to_worktree(const struct object_id *obj,
 				  const char *buf, unsigned long size)
 {
 	int fd;
-	char *path = git_pathdup(NOTES_MERGE_WORKTREE "/%s", oid_to_hex(obj));
-	if (safe_create_leading_directories_const(path))
+	char *path = repo_git_path(the_repository, NOTES_MERGE_WORKTREE "/%s", oid_to_hex(obj));
+	if (safe_create_leading_directories_const(the_repository, path))
 		die_errno("unable to create directory for '%s'", path);
 
 	fd = xopen(path, O_WRONLY | O_EXCL | O_CREAT, 0666);
@@ -335,8 +339,8 @@ static void write_note_to_worktree(const struct object_id *obj,
 				   const struct object_id *note)
 {
 	enum object_type type;
-	unsigned long size;
-	void *buf = repo_read_object_file(the_repository, note, &type, &size);
+	size_t size;
+	void *buf = odb_read_object(the_repository->objects, note, &type, &size);
 
 	if (!buf)
 		die("cannot read note %s for object %s",
@@ -355,9 +359,9 @@ static int ll_merge_in_worktree(struct notes_merge_options *o,
 	mmfile_t base, local, remote;
 	enum ll_merge_result status;
 
-	read_mmblob(&base, &p->base);
-	read_mmblob(&local, &p->local);
-	read_mmblob(&remote, &p->remote);
+	read_mmblob(&base, the_repository->objects, &p->base);
+	read_mmblob(&local, the_repository->objects, &p->local);
+	read_mmblob(&remote, the_repository->objects, &p->remote);
 
 	status = ll_merge(&result_buf, oid_to_hex(&p->obj), &base, NULL,
 			  &local, o->local_ref, &remote, o->remote_ref,
@@ -613,7 +617,7 @@ int notes_merge(struct notes_merge_options *o,
 	if (repo_get_merge_bases(the_repository, local, remote, &bases) < 0)
 		exit(128);
 	if (!bases) {
-		base_oid = null_oid();
+		base_oid = null_oid(the_hash_algo);
 		base_tree_oid = the_hash_algo->empty_tree;
 		if (o->verbosity >= 4)
 			printf("No merge base found; doing history-less merge\n");
@@ -664,11 +668,11 @@ int notes_merge(struct notes_merge_options *o,
 		commit_list_insert(local, &parents);
 		create_notes_commit(o->repo, local_tree, parents, o->commit_msg.buf,
 				    o->commit_msg.len, result_oid);
-		free_commit_list(parents);
+		commit_list_free(parents);
 	}
 
 found_result:
-	free_commit_list(bases);
+	commit_list_free(bases);
 	strbuf_release(&(o->commit_msg));
 	trace_printf("notes_merge(): result = %i, result_oid = %.7s\n",
 	       result, oid_to_hex(result_oid));
@@ -695,7 +699,7 @@ int notes_merge_commit(struct notes_merge_options *o,
 	const char *msg = strstr(buffer, "\n\n");
 	int baselen;
 
-	git_path_buf(&path, NOTES_MERGE_WORKTREE);
+	repo_git_path_replace(the_repository, &path, NOTES_MERGE_WORKTREE);
 	if (o->verbosity >= 3)
 		printf("Committing notes in notes merge worktree at %s\n",
 			path.buf);
@@ -725,7 +729,7 @@ int notes_merge_commit(struct notes_merge_options *o,
 		/* write file as blob, and add to partial_tree */
 		if (stat(path.buf, &st))
 			die_errno("Failed to stat '%s'", path.buf);
-		if (index_path(o->repo->index, &blob_oid, path.buf, &st, HASH_WRITE_OBJECT))
+		if (index_path(o->repo->index, &blob_oid, path.buf, &st, INDEX_WRITE_OBJECT))
 			die("Failed to write blob object from '%s'", path.buf);
 		if (add_note(partial_tree, &obj_oid, &blob_oid, NULL))
 			die("Failed to add resolved note '%s' to notes tree",
@@ -757,7 +761,7 @@ int notes_merge_abort(struct notes_merge_options *o)
 	struct strbuf buf = STRBUF_INIT;
 	int ret;
 
-	git_path_buf(&buf, NOTES_MERGE_WORKTREE);
+	repo_git_path_replace(the_repository, &buf, NOTES_MERGE_WORKTREE);
 	if (o->verbosity >= 3)
 		printf("Removing notes merge worktree at %s/*\n", buf.buf);
 	ret = remove_dir_recursively(&buf, REMOVE_DIR_KEEP_TOPLEVEL);

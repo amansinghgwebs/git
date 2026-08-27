@@ -11,23 +11,30 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-unique-files.sh
 
+test_expect_success 'setup' '
+	test_oid_cache <<-EOF
+	export_base sha1:73c9bab443d1f88ac61aa533d2eeaaa15451239c
+	export_base sha256:f210fa6346e3e2ce047bdb570426b17075980c1ac01fec8fc4b75bd3ab4bcfe4
+	EOF
+'
+
 test_expect_success 'usage on cmd and subcommand invalid option' '
 	test_expect_code 129 git stash --invalid-option 2>usage &&
-	grep "or: git stash" usage &&
+	test_grep "or: git stash" usage &&
 
 	test_expect_code 129 git stash push --invalid-option 2>usage &&
-	! grep "or: git stash" usage
+	test_grep ! "or: git stash" usage
 '
 
 test_expect_success 'usage on main command -h emits a summary of subcommands' '
-	test_expect_code 129 git stash -h >usage &&
-	grep -F "usage: git stash list" usage &&
-	grep -F "or: git stash show" usage
+	git stash -h >usage &&
+	test_grep -F "usage: git stash list" usage &&
+	test_grep -F "or: git stash show" usage
 '
 
 test_expect_success 'usage for subcommands should emit subcommand usage' '
-	test_expect_code 129 git stash push -h >usage &&
-	grep -F "usage: git stash [push" usage
+	git stash push -h >usage &&
+	test_grep -F "usage: git stash [push" usage
 '
 
 diff_cmp () {
@@ -49,6 +56,7 @@ setup_stash() {
 	git add other-file &&
 	test_tick &&
 	git commit -m initial &&
+	git tag initial &&
 	echo 2 >file &&
 	git add file &&
 	echo 3 >file &&
@@ -895,6 +903,7 @@ test_expect_success 'branch: should not drop the stash if the apply fails' '
 
 test_expect_success 'apply: show same status as git status (relative to ./)' '
 	git stash clear &&
+	mkdir -p subdir &&
 	echo 1 >subdir/subfile1 &&
 	echo 2 >subdir/subfile2 &&
 	git add subdir/subfile1 &&
@@ -956,7 +965,7 @@ test_expect_success 'store updates stash ref and reflog' '
 	test $(git rev-parse stash) = $STASH_ID &&
 	git reflog --format=%H stash| grep $STASH_ID &&
 	git stash pop &&
-	grep quux bazzy
+	test_grep quux bazzy
 '
 
 test_expect_success 'handle stash specification with spaces' '
@@ -968,7 +977,7 @@ test_expect_success 'handle stash specification with spaces' '
 	echo cow >file &&
 	git stash &&
 	git stash apply "stash@{$stamp}" &&
-	grep pig file
+	test_grep pig file
 '
 
 test_expect_success 'setup stash with index and worktree changes' '
@@ -1177,6 +1186,28 @@ test_expect_success 'stash -- <pathspec> stashes and restores the file' '
 	test_path_is_file bar
 '
 
+test_expect_success 'stash --patch <pathspec> stash and restores the file' '
+	test_write_lines b c >file &&
+	git commit -m "add a few lines" file &&
+	test_write_lines a b c d >file &&
+	test_write_lines b c d >expect-file &&
+	echo changed-other-file >other-file &&
+	test_write_lines s y n | git stash -m "stash bar" --patch file &&
+	test_cmp expect-file file &&
+	echo changed-other-file >expect &&
+	test_cmp expect other-file &&
+	git checkout HEAD -- file &&
+	git stash pop &&
+	test_cmp expect other-file &&
+	test_write_lines a b c >expect &&
+	test_cmp expect file
+'
+
+test_expect_success 'stash <pathspec> -p is rejected' '
+	test_must_fail git stash file -p 2>err &&
+	test_grep "subcommand wasn${SQ}t specified; ${SQ}push${SQ} can${SQ}t be assumed due to unexpected token ${SQ}file${SQ}" err
+'
+
 test_expect_success 'stash -- <pathspec> stashes in subdirectory' '
 	mkdir sub &&
 	>foo &&
@@ -1327,6 +1358,7 @@ test_expect_success 'stash -k -- <pathspec> leaves unstaged files intact' '
 
 test_expect_success 'stash -- <subdir> leaves untracked files in subdir intact' '
 	git reset &&
+	mkdir -p subdir &&
 	>subdir/untracked &&
 	>subdir/tracked1 &&
 	>subdir/tracked2 &&
@@ -1343,6 +1375,7 @@ test_expect_success 'stash -- <subdir> leaves untracked files in subdir intact' 
 
 test_expect_success 'stash -- <subdir> works with binary files' '
 	git reset &&
+	mkdir -p subdir &&
 	>subdir/untracked &&
 	>subdir/tracked &&
 	cp "$TEST_DIRECTORY"/test-binary-1.png subdir/tracked-binary &&
@@ -1410,6 +1443,100 @@ test_expect_success 'stash --keep-index --include-untracked with empty tree' '
 		echo content >expect &&
 		test_cmp expect file
 	)
+'
+
+test_expect_success 'stash export and import round-trip stashes' '
+	git reset &&
+	>untracked &&
+	>tracked1 &&
+	>tracked2 &&
+	git add tracked* &&
+	git stash -- &&
+	>subdir/untracked &&
+	>subdir/tracked1 &&
+	>subdir/tracked2 &&
+	git add subdir/tracked* &&
+	git stash --include-untracked -- subdir/ &&
+	git tag t-stash0 stash@{0} &&
+	git tag t-stash1 stash@{1} &&
+	simple=$(git stash export --print) &&
+	git stash clear &&
+	git stash import "$simple" &&
+	test_cmp_rev stash@{0} t-stash0 &&
+	test_cmp_rev stash@{1} t-stash1 &&
+	git stash export --to-ref refs/heads/foo &&
+	test_cmp_rev "$(test_oid empty_tree)" foo: &&
+	test_cmp_rev "$(test_oid empty_tree)" foo^: &&
+	test_cmp_rev t-stash0 foo^2 &&
+	test_cmp_rev t-stash1 foo^^2 &&
+	git log --first-parent --format="%s" refs/heads/foo >log &&
+	grep "^git stash: " log >log2 &&
+	test_line_count = 13 log2 &&
+	git stash clear &&
+	git stash import foo &&
+	test_cmp_rev stash@{0} t-stash0 &&
+	test_cmp_rev stash@{1} t-stash1
+'
+
+test_expect_success 'stash import appends commits' '
+	git log --format=oneline -g refs/stash >out &&
+	cat out out >out2 &&
+	git stash import refs/heads/foo &&
+	git log --format=oneline -g refs/stash >actual &&
+	test_line_count = $(wc -l <out2) actual
+'
+
+test_expect_success 'stash export can accept specified stashes' '
+	git stash clear &&
+	git stash import foo &&
+	git stash export --to-ref refs/heads/bar stash@{1} stash@{0} &&
+	git stash clear &&
+	git stash import refs/heads/bar &&
+	test_cmp_rev stash@{1} t-stash0 &&
+	test_cmp_rev stash@{0} t-stash1 &&
+	git log --format=oneline -g refs/stash >actual &&
+	test_line_count = 2 actual
+'
+
+test_expect_success 'stash export rejects invalid arguments' '
+	test_must_fail git stash export --print --to-ref refs/heads/invalid 2>err &&
+	test_grep "exactly one of --print and --to-ref is required" err &&
+	test_must_fail git stash export 2>err2 &&
+	test_grep "exactly one of --print and --to-ref is required" err2
+'
+
+test_expect_success 'stash can import and export zero stashes' '
+	git stash clear &&
+	git stash export --to-ref refs/heads/baz &&
+	test_cmp_rev "$(test_oid empty_tree)" baz: &&
+	test_cmp_rev "$(test_oid export_base)" baz &&
+	test_must_fail git rev-parse baz^1 &&
+	git stash import baz &&
+	test_must_fail git rev-parse refs/stash
+'
+
+test_expect_success 'stash rejects invalid attempts to import commits' '
+	git stash import foo &&
+	test_must_fail git stash import HEAD 2>output &&
+	oid=$(git rev-parse HEAD) &&
+	test_grep "$oid is not a valid exported stash commit" output &&
+	test_cmp_rev stash@{0} t-stash0 &&
+
+	git checkout --orphan orphan &&
+	git commit-tree $(test_oid empty_tree) -p "$oid" -p "$oid^" -m "" >fake-commit &&
+	git update-ref refs/heads/orphan "$(cat fake-commit)" &&
+	oid=$(git rev-parse HEAD) &&
+	test_must_fail git stash import orphan 2>output &&
+	test_grep "found stash commit $oid without expected prefix" output &&
+	test_cmp_rev stash@{0} t-stash0 &&
+
+	git checkout --orphan orphan2 &&
+	git commit-tree $(test_oid empty_tree) -m "" >fake-commit &&
+	git update-ref refs/heads/orphan2 "$(cat fake-commit)" &&
+	oid=$(git rev-parse HEAD) &&
+	test_must_fail git stash import orphan2 2>output &&
+	test_grep "found root commit $oid with invalid data" output &&
+	test_cmp_rev stash@{0} t-stash0
 '
 
 test_expect_success 'stash apply should succeed with unmodified file' '
@@ -1549,11 +1676,9 @@ test_expect_success 'stash create reports a locked index' '
 		echo change >A.file &&
 		touch .git/index.lock &&
 
-		cat >expect <<-EOF &&
-		error: could not write index
-		EOF
 		test_must_fail git stash create 2>err &&
-		test_cmp expect err
+		test_grep "error: could not write index" err &&
+		test_grep "error: Unable to create '.*index.lock'" err
 	)
 '
 
@@ -1566,11 +1691,9 @@ test_expect_success 'stash push reports a locked index' '
 		echo change >A.file &&
 		touch .git/index.lock &&
 
-		cat >expect <<-EOF &&
-		error: could not write index
-		EOF
 		test_must_fail git stash push 2>err &&
-		test_cmp expect err
+		test_grep "error: could not write index" err &&
+		test_grep "error: Unable to create '.*index.lock'" err
 	)
 '
 
@@ -1584,12 +1707,128 @@ test_expect_success 'stash apply reports a locked index' '
 		git stash push &&
 		touch .git/index.lock &&
 
-		cat >expect <<-EOF &&
-		error: could not write index
-		EOF
 		test_must_fail git stash apply 2>err &&
-		test_cmp expect err
+		test_grep "error: could not write index" err &&
+		test_grep "error: Unable to create '.*index.lock'" err
 	)
+'
+
+test_expect_success 'submodules does not affect the branch recorded in stash message' '
+	git init sub_project &&
+	(
+		cd sub_project &&
+		echo "Initial content in sub_project" >sub_file.txt &&
+		git add sub_file.txt &&
+		git commit -m "Initial commit in sub_project"
+	) &&
+
+	git init main_project &&
+	(
+		cd main_project &&
+		echo "Initial content in main_project" >main_file.txt &&
+		git add main_file.txt &&
+		git commit -m "Initial commit in main_project" &&
+
+		git -c protocol.file.allow=always submodule add ../sub_project sub &&
+		git commit -m "Added submodule sub_project" &&
+
+		git checkout -b feature_main &&
+		git -C sub checkout -b feature_sub &&
+
+		git checkout -b work_branch &&
+		echo "Important work to be stashed" >work_item.txt &&
+		git add work_item.txt &&
+		git stash push -m "custom stash for work_branch" &&
+
+		git stash list >../actual_stash_list.txt &&
+		test_grep "On work_branch: custom stash for work_branch" ../actual_stash_list.txt
+	)
+'
+
+test_expect_success SANITIZE_LEAK 'stash show handles -- without leaking' '
+	git stash show --
+'
+
+test_expect_success 'controlled error return on unrecognized option' '
+	test_expect_code 129 git stash show -p --invalid 2>usage &&
+	test_grep -e "^usage: git stash show" usage
+'
+
+test_expect_success 'stash.index=true implies --index' '
+	# setup for a few related tests
+	test_commit file base &&
+	echo index >file &&
+	git add file &&
+	echo working >file &&
+	git stash &&
+
+	test_when_finished "git reset --hard" &&
+	git -c stash.index=true stash apply &&
+	echo index >expect &&
+	git show :0:file >actual &&
+	test_cmp expect actual &&
+	echo working >expect &&
+	test_cmp expect file
+'
+
+test_expect_success 'stash.index=true overridden by --no-index' '
+	test_when_finished "git reset --hard" &&
+	git -c stash.index=true stash apply --no-index &&
+	echo base >expect &&
+	git show :0:file >actual &&
+	test_cmp expect actual &&
+	echo working >expect &&
+	test_cmp expect file
+'
+
+test_expect_success 'stash.index=false overridden by --index' '
+	test_when_finished "git reset --hard" &&
+	git -c stash.index=false stash apply --index &&
+	echo index >expect &&
+	git show :0:file >actual &&
+	test_cmp expect actual &&
+	echo working >expect &&
+	test_cmp expect file
+'
+
+test_expect_success 'apply with custom conflict labels' '
+	git reset --hard initial &&
+	test_commit label-base conflict-file base-content &&
+	echo stashed >conflict-file &&
+	git stash push -m "stashed" &&
+	test_commit label-upstream conflict-file upstream-content &&
+	test_must_fail git -c merge.conflictStyle=diff3 stash apply --label-ours=UP --label-theirs=STASH &&
+	test_grep "^<<<<<<< UP" conflict-file &&
+	test_grep "^||||||| Stash base" conflict-file &&
+	test_grep "^>>>>>>> STASH" conflict-file
+'
+
+test_expect_success 'apply with empty conflict labels' '
+	git reset --hard initial &&
+	test_commit empty-label-base conflict-file base-content &&
+	echo stashed >conflict-file &&
+	git stash push -m "stashed" &&
+	test_commit empty-label-upstream conflict-file upstream-content &&
+	test_must_fail git stash apply --label-ours= --label-theirs= &&
+	test_grep "^<<<<<<<$" conflict-file &&
+	test_grep "^>>>>>>>$" conflict-file
+'
+
+test_expect_success 'stash show --include-untracked includes untracked files' '
+	git reset --hard &&
+
+	echo tracked >tracked &&
+	git add tracked &&
+	git commit -m "base" &&
+
+	echo change >>tracked &&
+	echo untracked >untracked &&
+
+	git stash push --include-untracked &&
+	test_path_is_missing untracked &&
+
+	git stash show --include-untracked >actual &&
+	test_grep "untracked" actual
 '
 
 test_done

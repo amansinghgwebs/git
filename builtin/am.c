@@ -31,7 +31,7 @@
 #include "preload-index.h"
 #include "sequencer.h"
 #include "revision.h"
-#include "merge-recursive.h"
+#include "merge-ort-wrappers.h"
 #include "log-tree.h"
 #include "notes-utils.h"
 #include "rerere.h"
@@ -158,22 +158,22 @@ static void am_state_init(struct am_state *state)
 
 	memset(state, 0, sizeof(*state));
 
-	state->dir = git_pathdup("rebase-apply");
+	state->dir = repo_git_path(the_repository, "rebase-apply");
 
 	state->prec = 4;
 
-	git_config_get_bool("am.threeway", &state->threeway);
+	repo_config_get_bool(the_repository, "am.threeway", &state->threeway);
 
 	state->utf8 = 1;
 
-	git_config_get_bool("am.messageid", &state->message_id);
+	repo_config_get_bool(the_repository, "am.messageid", &state->message_id);
 
 	state->scissors = SCISSORS_UNSET;
 	state->quoted_cr = quoted_cr_unset;
 
 	strvec_init(&state->git_apply_opts);
 
-	if (!git_config_get_bool("commit.gpgsign", &gpgsign))
+	if (!repo_config_get_bool(the_repository, "commit.gpgsign", &gpgsign))
 		state->sign_commit = gpgsign ? "" : NULL;
 }
 
@@ -490,9 +490,11 @@ static int run_applypatch_msg_hook(struct am_state *state)
 
 	assert(state->msg);
 
-	if (!state->no_verify)
-		ret = run_hooks_l(the_repository, "applypatch-msg",
-				  am_path(state, "final-commit"), NULL);
+	if (!state->no_verify) {
+		struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT_FORCE_SERIAL;
+		strvec_push(&opt.args, am_path(state, "final-commit"));
+		ret = run_hooks_opt(the_repository, "applypatch-msg", &opt);
+	}
 
 	if (!ret) {
 		FREE_AND_NULL(state->msg);
@@ -850,8 +852,10 @@ static int split_mail_stgit_series(struct am_state *state, const char **paths,
 	series_dir = dirname(series_dir_buf);
 
 	fp = fopen(*paths, "r");
-	if (!fp)
+	if (!fp) {
+		free(series_dir_buf);
 		return error_errno(_("could not open '%s' for reading"), *paths);
+	}
 
 	while (!strbuf_getline_lf(&sb, fp)) {
 		if (*sb.buf == '#')
@@ -963,7 +967,7 @@ static int split_mail(struct am_state *state, enum patch_format patch_format,
 {
 	if (keep_cr < 0) {
 		keep_cr = 0;
-		git_config_get_bool("am.keepcr", &keep_cr);
+		repo_config_get_bool(the_repository, "am.keepcr", &keep_cr);
 	}
 
 	switch (patch_format) {
@@ -998,7 +1002,7 @@ static void am_setup(struct am_state *state, enum patch_format patch_format,
 
 	if (!patch_format) {
 		fprintf_ln(stderr, _("Patch format detection failed."));
-		exit(128);
+		die(NULL);
 	}
 
 	if (mkdir(state->dir, 0777) < 0 && errno != EEXIST)
@@ -1176,7 +1180,7 @@ static void NORETURN die_user_resolve(const struct am_state *state)
 		strbuf_release(&sb);
 	}
 
-	exit(128);
+	die(NULL);
 }
 
 /**
@@ -1186,7 +1190,7 @@ static void am_append_signoff(struct am_state *state)
 {
 	struct strbuf sb = STRBUF_INIT;
 
-	strbuf_attach(&sb, state->msg, state->msg_len, state->msg_len);
+	strbuf_attach(&sb, state->msg, state->msg_len, state->msg_len + 1);
 	append_signoff(&sb, 0, 0);
 	state->msg = strbuf_detach(&sb, &state->msg_len);
 }
@@ -1406,7 +1410,7 @@ static void write_commit_patch(const struct am_state *state, struct commit *comm
 	rev_info.no_commit_id = 1;
 	rev_info.diffopt.flags.binary = 1;
 	rev_info.diffopt.flags.full_index = 1;
-	rev_info.diffopt.use_color = 0;
+	rev_info.diffopt.use_color = GIT_COLOR_NEVER;
 	rev_info.diffopt.file = fp;
 	rev_info.diffopt.close_file = 1;
 	add_pending_object(&rev_info, &commit->object, "");
@@ -1439,7 +1443,7 @@ static void write_index_patch(const struct am_state *state)
 	rev_info.disable_stdin = 1;
 	rev_info.no_commit_id = 1;
 	rev_info.diffopt.output_format = DIFF_FORMAT_PATCH;
-	rev_info.diffopt.use_color = 0;
+	rev_info.diffopt.use_color = GIT_COLOR_NEVER;
 	rev_info.diffopt.file = fp;
 	rev_info.diffopt.close_file = 1;
 	add_pending_object(&rev_info, &tree->object, "");
@@ -1638,12 +1642,13 @@ static int fall_back_threeway(const struct am_state *state, const char *index_pa
 	o.branch1 = "HEAD";
 	their_tree_name = xstrfmt("%.*s", linelen(state->msg), state->msg);
 	o.branch2 = their_tree_name;
+	o.ancestor = "constructed fake ancestor";
 	o.detect_directory_renames = MERGE_DIRECTORY_RENAMES_NONE;
 
 	if (state->quiet)
 		o.verbosity = 0;
 
-	if (merge_recursive_generic(&o, &our_tree, &their_tree, 1, bases, &result)) {
+	if (merge_ort_generic(&o, &our_tree, &their_tree, 1, bases, &result)) {
 		repo_rerere(the_repository, state->allow_rerere_autoupdate);
 		free(their_tree_name);
 		return error(_("Failed to merge in the changes."));
@@ -1723,7 +1728,7 @@ static void do_commit(const struct am_state *state)
 
 	run_hooks(the_repository, "post-applypatch");
 
-	free_commit_list(parents);
+	commit_list_free(parents);
 	strbuf_release(&sb);
 }
 
@@ -1934,7 +1939,7 @@ next:
 	 */
 	if (!state->rebasing) {
 		am_destroy(state);
-		run_auto_maintenance(state->quiet);
+		run_auto_maintenance(the_repository, state->quiet);
 	}
 }
 
@@ -1995,7 +2000,7 @@ static int fast_forward_to(struct tree *head, struct tree *remote, int reset)
 	struct unpack_trees_options opts;
 	struct tree_desc t[2];
 
-	if (parse_tree(head) || parse_tree(remote))
+	if (repo_parse_tree(the_repository, head) || repo_parse_tree(the_repository, remote))
 		return -1;
 
 	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
@@ -2035,7 +2040,7 @@ static int merge_tree(struct tree *tree)
 	struct unpack_trees_options opts;
 	struct tree_desc t[1];
 
-	if (parse_tree(tree))
+	if (repo_parse_tree(the_repository, tree))
 		return -1;
 
 	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
@@ -2068,11 +2073,11 @@ static int clean_index(const struct object_id *head, const struct object_id *rem
 	struct tree *head_tree, *remote_tree, *index_tree;
 	struct object_id index;
 
-	head_tree = parse_tree_indirect(head);
+	head_tree = repo_parse_tree_indirect(the_repository, head);
 	if (!head_tree)
 		return error(_("Could not parse object '%s'."), oid_to_hex(head));
 
-	remote_tree = parse_tree_indirect(remote);
+	remote_tree = repo_parse_tree_indirect(the_repository, remote);
 	if (!remote_tree)
 		return error(_("Could not parse object '%s'."), oid_to_hex(remote));
 
@@ -2086,7 +2091,7 @@ static int clean_index(const struct object_id *head, const struct object_id *rem
 				0, NULL))
 		return -1;
 
-	index_tree = parse_tree_indirect(&index);
+	index_tree = repo_parse_tree_indirect(the_repository, &index);
 	if (!index_tree)
 		return error(_("Could not parse object '%s'."), oid_to_hex(&index));
 
@@ -2399,11 +2404,17 @@ int cmd_am(int argc,
 		OPT_CMDMODE(0, "quit", &resume_mode,
 			N_("abort the patching operation but keep HEAD where it is"),
 			RESUME_QUIT),
-		{ OPTION_CALLBACK, 0, "show-current-patch", &resume_mode,
-		  "(diff|raw)",
-		  N_("show the patch being applied"),
-		  PARSE_OPT_CMDMODE | PARSE_OPT_OPTARG | PARSE_OPT_NONEG | PARSE_OPT_LITERAL_ARGHELP,
-		  parse_opt_show_current_patch, RESUME_SHOW_PATCH_RAW },
+		{
+			.type = OPTION_CALLBACK,
+			.long_name = "show-current-patch",
+			.value = &resume_mode,
+			.precision = sizeof(resume_mode),
+			.argh = "(diff|raw)",
+			.help = N_("show the patch being applied"),
+			.flags = PARSE_OPT_CMDMODE | PARSE_OPT_OPTARG | PARSE_OPT_NONEG | PARSE_OPT_LITERAL_ARGHELP,
+			.callback = parse_opt_show_current_patch,
+			.defval = RESUME_SHOW_PATCH_RAW,
+		},
 		OPT_CMDMODE(0, "retry", &resume_mode,
 			N_("try to apply current patch again"),
 			RESUME_APPLY),
@@ -2416,9 +2427,16 @@ int cmd_am(int argc,
 		OPT_BOOL(0, "ignore-date", &state.ignore_date,
 			N_("use current timestamp for author date")),
 		OPT_RERERE_AUTOUPDATE(&state.allow_rerere_autoupdate),
-		{ OPTION_STRING, 'S', "gpg-sign", &state.sign_commit, N_("key-id"),
-		  N_("GPG-sign commits"),
-		  PARSE_OPT_OPTARG, NULL, (intptr_t) "" },
+		{
+			.type = OPTION_STRING,
+			.short_name = 'S',
+			.long_name = "gpg-sign",
+			.value = &state.sign_commit,
+			.argh = N_("key-id"),
+			.help = N_("GPG-sign commits"),
+			.flags = PARSE_OPT_OPTARG,
+			.defval = (intptr_t) "",
+		},
 		OPT_CALLBACK_F(0, "empty", &state.empty_type, "(stop|drop|keep)",
 		  N_("how to handle empty patches"),
 		  PARSE_OPT_NONEG, am_option_parse_empty),
@@ -2429,7 +2447,7 @@ int cmd_am(int argc,
 
 	show_usage_with_options_if_asked(argc, argv, usage, options);
 
-	git_config(git_default_config, NULL);
+	repo_config(the_repository, git_default_config, NULL);
 
 	am_state_init(&state);
 

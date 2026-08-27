@@ -134,6 +134,12 @@ test_expect_success 'diff-filter=D' '
 
 '
 
+test_expect_success 'all-negative filter' '
+	git log --no-renames --format=%s --diff-filter=d HEAD >actual &&
+	printf "%s\n" fifth fourth third second initial >expect &&
+	test_cmp expect actual
+'
+
 test_expect_success 'diff-filter=R' '
 
 	git log -M --pretty="format:%s" --diff-filter=R HEAD >actual &&
@@ -486,10 +492,16 @@ test_expect_success !FAIL_PREREQS 'log with various grep.patternType configurati
 	)
 '
 
-for cmd in show whatchanged reflog format-patch
+cmds="show reflog format-patch"
+if test_have_prereq !WITH_BREAKING_CHANGES
+then
+	cmds="$cmds whatchanged"
+fi
+for cmd in $cmds
 do
 	case "$cmd" in
 	format-patch) myarg="HEAD~.." ;;
+	whatchanged) myarg=--i-still-use-this ;;
 	*) myarg= ;;
 	esac
 
@@ -656,12 +668,12 @@ test_expect_success 'log --graph with merge with log.graphColors' '
 
 test_expect_success 'log --raw --graph -m with merge' '
 	git log --raw --graph --oneline -m main | head -n 500 >actual &&
-	grep "initial" actual
+	test_grep "initial" actual
 '
 
 test_expect_success 'diff-tree --graph' '
 	git diff-tree --graph main^ | head -n 500 >actual &&
-	grep "one" actual
+	test_grep "one" actual
 '
 
 cat > expect <<\EOF
@@ -1070,13 +1082,13 @@ test_expect_success 'decorate-refs and simplify-by-decoration without output' '
 test_expect_success 'decorate-refs-exclude HEAD' '
 	git log --decorate=full --oneline \
 		--decorate-refs-exclude="HEAD" >actual &&
-	! grep HEAD actual
+	test_grep ! HEAD actual
 '
 
 test_expect_success 'decorate-refs focus from default' '
 	git log --decorate=full --oneline \
 		--decorate-refs="refs/heads" >actual &&
-	! grep HEAD actual
+	test_grep ! HEAD actual
 '
 
 test_expect_success '--clear-decorations overrides defaults' '
@@ -1201,20 +1213,27 @@ test_expect_success 'reflog is expected format' '
 	test_cmp expect actual
 '
 
-test_expect_success 'whatchanged is expected format' '
+test_expect_success !WITH_BREAKING_CHANGES 'whatchanged is expected format' '
+	whatchanged="whatchanged --i-still-use-this" &&
 	git log --no-merges --raw >expect &&
-	git whatchanged >actual &&
+	git $whatchanged >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'log.abbrevCommit configuration' '
+	whatchanged="whatchanged --i-still-use-this" &&
+
 	git log --abbrev-commit >expect.log.abbrev &&
 	git log --no-abbrev-commit >expect.log.full &&
 	git log --pretty=raw >expect.log.raw &&
 	git reflog --abbrev-commit >expect.reflog.abbrev &&
 	git reflog --no-abbrev-commit >expect.reflog.full &&
-	git whatchanged --abbrev-commit >expect.whatchanged.abbrev &&
-	git whatchanged --no-abbrev-commit >expect.whatchanged.full &&
+
+	if test_have_prereq !WITH_BREAKING_CHANGES
+	then
+		git $whatchanged --abbrev-commit >expect.whatchanged.abbrev &&
+		git $whatchanged --no-abbrev-commit >expect.whatchanged.full
+	fi &&
 
 	test_config log.abbrevCommit true &&
 
@@ -1231,10 +1250,13 @@ test_expect_success 'log.abbrevCommit configuration' '
 	git reflog --no-abbrev-commit >actual &&
 	test_cmp expect.reflog.full actual &&
 
-	git whatchanged >actual &&
-	test_cmp expect.whatchanged.abbrev actual &&
-	git whatchanged --no-abbrev-commit >actual &&
-	test_cmp expect.whatchanged.full actual
+	if test_have_prereq !WITH_BREAKING_CHANGES
+	then
+		git $whatchanged >actual &&
+		test_cmp expect.whatchanged.abbrev actual &&
+		git $whatchanged --no-abbrev-commit >actual &&
+		test_cmp expect.whatchanged.full actual
+	fi
 '
 
 test_expect_success '--abbrev-commit with core.abbrev=false' '
@@ -1860,6 +1882,46 @@ test_expect_success 'log --graph with --name-status' '
 	test_cmp_graph --name-status tangle..reach
 '
 
+test_expect_success 'log --max-count-oldest=3 --oneline' '
+	test_when_finished rm expect &&
+	git log --oneline | tail -n3 >expect &&
+	git log --oneline --max-count-oldest=3 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log --max-count-oldest=3 --reverse --oneline' '
+	test_when_finished rm expect &&
+	git log --oneline --reverse | head -n3 >expect &&
+	git log --oneline --max-count-oldest=3 --reverse >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log --max-count-oldest with --max-count' '
+	test_when_finished rm stderr &&
+	test_must_fail git log --max-count-oldest=3 --max-count=3 2>stderr &&
+	test_grep "cannot be used together" stderr
+'
+
+test_expect_success 'log --max-count-oldest with --skip' '
+	test_when_finished rm stderr &&
+	test_must_fail git log --max-count-oldest=3 --skip=1 2>stderr &&
+	test_grep "cannot be used together" stderr
+'
+
+test_expect_success 'log --max-count-oldest=1000 --graph --boundary' '
+	test_when_finished rm expect actual &&
+	git log --graph --boundary >expect &&
+	git log --max-count-oldest=1000 --graph --boundary >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log --oneline --graph --boundary --max-count-oldest=1' '
+	test_when_finished rm -f actual &&
+	git log --oneline --graph --boundary --max-count-oldest=1 \
+		HEAD~1..HEAD >actual &&
+	test_line_count = 2 actual
+'
+
 cat >expect <<-\EOF
 * reach
 |
@@ -2033,45 +2095,45 @@ test_expect_success GPGSSH 'log ssh key fingerprint' '
 
 test_expect_success GPG 'log --graph --show-signature' '
 	git log --graph --show-signature -n1 signed >actual &&
-	grep "^| gpg: Signature made" actual &&
-	grep "^| gpg: Good signature" actual
+	test_grep "^| gpg: Signature made" actual &&
+	test_grep "^| gpg: Good signature" actual
 '
 
 test_expect_success GPGSM 'log --graph --show-signature x509' '
 	git log --graph --show-signature -n1 signed-x509 >actual &&
-	grep "^| gpgsm: Signature made" actual &&
-	grep "^| gpgsm: Good signature" actual
+	test_grep "^| gpgsm: Signature made" actual &&
+	test_grep "^| gpgsm: Good signature" actual
 '
 
 test_expect_success GPGSSH 'log --graph --show-signature ssh' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 signed-ssh >actual &&
-	grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
+	test_grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
 '
 
 test_expect_success GPGSSH,GPGSSH_VERIFYTIME 'log shows failure on expired signature key' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 expired-signed >actual &&
-	! grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
+	test_grep ! "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
 '
 
 test_expect_success GPGSSH,GPGSSH_VERIFYTIME 'log shows failure on not yet valid signature key' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 notyetvalid-signed >actual &&
-	! grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
+	test_grep ! "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
 '
 
 test_expect_success GPGSSH,GPGSSH_VERIFYTIME 'log show success with commit date and key validity matching' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 timeboxedvalid-signed >actual &&
-	grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual &&
-	! grep "${GPGSSH_BAD_SIGNATURE}" actual
+	test_grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual &&
+	test_grep ! "${GPGSSH_BAD_SIGNATURE}" actual
 '
 
 test_expect_success GPGSSH,GPGSSH_VERIFYTIME 'log shows failure with commit date outside of key validity' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 timeboxedinvalid-signed >actual &&
-	! grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
+	test_grep ! "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
 '
 
 test_expect_success GPG 'log --graph --show-signature for merged tag' '
@@ -2088,9 +2150,9 @@ test_expect_success GPG 'log --graph --show-signature for merged tag' '
 	git checkout plain &&
 	git merge --no-ff -m msg signed_tag &&
 	git log --graph --show-signature -n1 plain >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep "^| | gpg: Signature made" actual &&
-	grep "^| | gpg: Good signature" actual
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep "^| | gpg: Signature made" actual &&
+	test_grep "^| | gpg: Good signature" actual
 '
 
 test_expect_success GPG 'log --graph --show-signature for merged tag in shallow clone' '
@@ -2110,7 +2172,7 @@ test_expect_success GPG 'log --graph --show-signature for merged tag in shallow 
 	git clone --depth 1 --no-local . shallow &&
 	test_when_finished "rm -rf shallow" &&
 	git -C shallow log --graph --show-signature -n1 plain-shallow >actual &&
-	grep "tag signed_tag_shallow names a non-parent $hash" actual
+	test_grep "tag signed_tag_shallow names a non-parent $hash" actual
 '
 
 test_expect_success GPG 'log --graph --show-signature for merged tag with missing key' '
@@ -2127,9 +2189,9 @@ test_expect_success GPG 'log --graph --show-signature for merged tag with missin
 	git checkout plain-nokey &&
 	git merge --no-ff -m msg signed_tag_nokey &&
 	GNUPGHOME=. git log --graph --show-signature -n1 plain-nokey >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep "^| | gpg: Signature made" actual &&
-	grep -E "^| | gpg: Can'"'"'t check signature: (public key not found|No public key)" actual
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep "^| | gpg: Signature made" actual &&
+	test_grep -E "^| | gpg: Can'"'"'t check signature: (public key not found|No public key)" actual
 '
 
 test_expect_success GPG 'log --graph --show-signature for merged tag with bad signature' '
@@ -2149,9 +2211,9 @@ test_expect_success GPG 'log --graph --show-signature for merged tag with bad si
 	git checkout plain-bad &&
 	git merge --no-ff -m msg "$(cat forged.tag)" &&
 	git log --graph --show-signature -n1 plain-bad >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep "^| | gpg: Signature made" actual &&
-	grep "^| | gpg: BAD signature from" actual
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep "^| | gpg: Signature made" actual &&
+	test_grep "^| | gpg: BAD signature from" actual
 '
 
 test_expect_success GPG 'log --show-signature for merged tag with GPG failure' '
@@ -2170,9 +2232,9 @@ test_expect_success GPG 'log --show-signature for merged tag with GPG failure' '
 	if ! test_have_prereq VALGRIND
 	then
 		TMPDIR="$(pwd)/bogus" git log --show-signature -n1 plain-fail >actual &&
-		grep "^merged tag" actual &&
-		grep "^No signature" actual &&
-		! grep "^gpg: Signature made" actual
+		test_grep "^merged tag" actual &&
+		test_grep "^No signature" actual &&
+		test_grep ! "^gpg: Signature made" actual
 	fi
 '
 
@@ -2192,9 +2254,9 @@ test_expect_success GPGSM 'log --graph --show-signature for merged tag x509' '
 	git checkout plain-x509 &&
 	git merge --no-ff -m msg signed_tag_x509 &&
 	git log --graph --show-signature -n1 plain-x509 >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep "^| | gpgsm: Signature made" actual &&
-	grep "^| | gpgsm: Good signature" actual
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep "^| | gpgsm: Signature made" actual &&
+	test_grep "^| | gpgsm: Good signature" actual
 '
 
 test_expect_success GPGSM 'log --graph --show-signature for merged tag x509 missing key' '
@@ -2213,8 +2275,8 @@ test_expect_success GPGSM 'log --graph --show-signature for merged tag x509 miss
 	git checkout plain-x509-nokey &&
 	git merge --no-ff -m msg signed_tag_x509_nokey &&
 	GNUPGHOME=. git log --graph --show-signature -n1 plain-x509-nokey >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep -e "^| | gpgsm: certificate not found" \
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep -e "^| | gpgsm: certificate not found" \
 	     -e "^| | gpgsm: failed to find the certificate: Not found" actual
 '
 
@@ -2237,35 +2299,35 @@ test_expect_success GPGSM 'log --graph --show-signature for merged tag x509 bad 
 	git checkout plain-x509-bad &&
 	git merge --no-ff -m msg "$(cat forged.tag)" &&
 	git log --graph --show-signature -n1 plain-x509-bad >actual &&
-	grep "^|\\\  merged tag" actual &&
-	grep "^| | gpgsm: Signature made" actual &&
-	grep "^| | gpgsm: invalid signature" actual
+	test_grep "^|\\\  merged tag" actual &&
+	test_grep "^| | gpgsm: Signature made" actual &&
+	test_grep "^| | gpgsm: invalid signature" actual
 '
 
 
 test_expect_success GPG '--no-show-signature overrides --show-signature' '
 	git log -1 --show-signature --no-show-signature signed >actual &&
-	! grep "^gpg:" actual
+	test_grep ! "^gpg:" actual
 '
 
 test_expect_success GPG 'log.showsignature=true behaves like --show-signature' '
 	test_config log.showsignature true &&
 	git log -1 signed >actual &&
-	grep "gpg: Signature made" actual &&
-	grep "gpg: Good signature" actual
+	test_grep "gpg: Signature made" actual &&
+	test_grep "gpg: Good signature" actual
 '
 
 test_expect_success GPG '--no-show-signature overrides log.showsignature=true' '
 	test_config log.showsignature true &&
 	git log -1 --no-show-signature signed >actual &&
-	! grep "^gpg:" actual
+	test_grep ! "^gpg:" actual
 '
 
 test_expect_success GPG '--show-signature overrides log.showsignature=false' '
 	test_config log.showsignature false &&
 	git log -1 --show-signature signed >actual &&
-	grep "gpg: Signature made" actual &&
-	grep "gpg: Good signature" actual
+	test_grep "gpg: Signature made" actual &&
+	test_grep "gpg: Good signature" actual
 '
 
 test_expect_success 'log --graph --no-walk is forbidden' '
@@ -2361,7 +2423,7 @@ test_expect_success 'log --decorate does not include things outside filter' '
 	git log --decorate=full --oneline >actual &&
 
 	# None of the refs are visible:
-	! grep /fake actual
+	test_grep ! /fake actual
 '
 
 test_expect_success 'log --end-of-options' '

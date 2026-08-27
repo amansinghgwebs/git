@@ -11,7 +11,7 @@
 #include "packfile.h"
 #include "path.h"
 #include "object-file.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "server-info.h"
 #include "strbuf.h"
 #include "tempfile.h"
@@ -88,7 +88,7 @@ static int update_info_file(struct repository *r, char *path,
 		.old_sb = STRBUF_INIT
 	};
 
-	safe_create_leading_directories(path);
+	safe_create_leading_directories(r, path);
 	f = mks_tempfile_m(tmp, 0666);
 	if (!f)
 		goto out;
@@ -125,7 +125,7 @@ static int update_info_file(struct repository *r, char *path,
 	uic.cur_fp = NULL;
 
 	if (uic_is_stale(&uic)) {
-		if (adjust_shared_perm(get_tempfile_path(f)) < 0)
+		if (adjust_shared_perm(r, get_tempfile_path(f)) < 0)
 			goto out;
 		if (rename_tempfile(&f, path) < 0)
 			goto out;
@@ -148,23 +148,21 @@ out:
 	return ret;
 }
 
-static int add_info_ref(const char *path, const char *referent UNUSED, const struct object_id *oid,
-			int flag UNUSED,
-			void *cb_data)
+static int add_info_ref(const struct reference *ref, void *cb_data)
 {
 	struct update_info_ctx *uic = cb_data;
-	struct object *o = parse_object(uic->repo, oid);
+	struct object *o = parse_object(uic->repo, ref->oid);
 	if (!o)
 		return -1;
 
-	if (uic_printf(uic, "%s	%s\n", oid_to_hex(oid), path) < 0)
+	if (uic_printf(uic, "%s	%s\n", oid_to_hex(ref->oid), ref->name) < 0)
 		return -1;
 
 	if (o->type == OBJ_TAG) {
-		o = deref_tag(uic->repo, o, path, 0);
+		o = deref_tag(uic->repo, o, ref->name, 0);
 		if (o)
 			if (uic_printf(uic, "%s	%s^{}\n",
-				oid_to_hex(&o->oid), path) < 0)
+				oid_to_hex(&o->oid), ref->name) < 0)
 				return -1;
 	}
 	return 0;
@@ -292,7 +290,7 @@ static void init_pack_info(struct repository *r, const char *infofile, int force
 	int i;
 	size_t alloc = 0;
 
-	for (p = get_all_packs(r); p; p = p->next) {
+	repo_for_each_pack(r, p) {
 		/* we ignore things on alternate path since they are
 		 * not available to the pullers in general.
 		 */

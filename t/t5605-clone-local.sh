@@ -156,11 +156,10 @@ test_expect_success 'cloning a local path with --no-local does not hardlink' '
 test_expect_success 'cloning a local path with --no-local from a different user succeeds' '
 	git clone --upload-pack="GIT_TEST_ASSUME_DIFFERENT_OWNER=true git-upload-pack" \
 		--no-local a nonlocal-otheruser 2>err &&
-	! repo_is_hardlinked nonlocal-otheruser &&
+	! repo_is_hardlinked nonlocal-otheruser/.git &&
 	# Verify that this is a git repository.
 	git -C nonlocal-otheruser rev-parse --show-toplevel &&
-	! test_grep "detected dubious ownership" err
-
+	test_grep ! "detected dubious ownership" err
 '
 
 test_expect_success 'cloning locally respects "-u" for fetching refs' '
@@ -173,7 +172,7 @@ test_expect_success REFFILES 'local clone from repo with corrupt refs fails grac
 	echo a >corrupt/.git/refs/heads/topic &&
 
 	test_must_fail git clone corrupt working 2>err &&
-	grep "has neither a valid OID nor a target" err
+	test_grep "has neither a valid OID nor a target" err
 '
 
 test_done

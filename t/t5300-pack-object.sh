@@ -9,9 +9,9 @@ test_description='git pack-object'
 
 test_expect_success 'setup' '
 	rm -f .git/index* &&
-	perl -e "print \"a\" x 4096;" >a &&
-	perl -e "print \"b\" x 4096;" >b &&
-	perl -e "print \"c\" x 4096;" >c &&
+	test-tool genzeros 4096 | tr "\000" "a" >a &&
+	test-tool genzeros 4096 | tr "\000" "b" >b &&
+	test-tool genzeros 4096 | tr "\000" "c" >c &&
 	test-tool genrandom "seed a" 2097152 >a_big &&
 	test-tool genrandom "seed b" 2097152 >b_big &&
 	git update-index --add a a_big b b_big c &&
@@ -140,7 +140,7 @@ test_expect_success 'pack-object <stdin parsing: --stdin-packs handles garbage' 
 # usage: check_deltas <stderr_from_pack_objects> <cmp_op> <nr_deltas>
 # e.g.: check_deltas stderr -gt 0
 check_deltas() {
-	deltas=$(perl -lne '/delta (\d+)/ and print $1' "$1") &&
+	deltas=$(sed -n 's/Total [0-9][0-9]* (delta \([0-9][0-9]*\)).*/\1/p' "$1") &&
 	shift &&
 	if ! test "$deltas" "$@"
 	then
@@ -215,7 +215,7 @@ test_expect_success 'unpack with OFS_DELTA (core.fsyncmethod=batch)' '
 	check_unpack test-3-${packname_3} obj-list "$BATCH_CONFIGURATION"
 '
 
-test_expect_success 'compare delta flavors' '
+test_expect_success PERL_TEST_HELPERS 'compare delta flavors' '
 	perl -e '\''
 		defined($_ = -s $_) or die for @ARGV;
 		exit 1 if $ARGV[0] <= $ARGV[1];
@@ -525,7 +525,7 @@ test_expect_success 'index-pack --strict <pack> works in non-repo' '
 	test_path_is_file foo.idx
 '
 
-test_expect_success SHA1 'show-index works OK outside a repository' '
+test_expect_success DEFAULT_HASH_ALGORITHM 'show-index works OK outside a repository' '
 	nongit git show-index <foo.idx
 '
 
@@ -548,18 +548,18 @@ test_expect_success !PTHREADS,!FAIL_PREREQS \
 	test_must_fail git index-pack --threads=2 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring --threads=2" err &&
+	test_grep -F "no threads support, ignoring --threads=2" err &&
 
 	test_must_fail git -c pack.threads=2 index-pack 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring pack.threads" err &&
+	test_grep -F "no threads support, ignoring pack.threads" err &&
 
 	test_must_fail git -c pack.threads=2 index-pack --threads=4 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 2 warnings &&
-	grep -F "no threads support, ignoring --threads=4" err &&
-	grep -F "no threads support, ignoring pack.threads" err
+	test_grep -F "no threads support, ignoring --threads=4" err &&
+	test_grep -F "no threads support, ignoring pack.threads" err
 '
 
 test_expect_success !PTHREADS,!FAIL_PREREQS \
@@ -567,18 +567,18 @@ test_expect_success !PTHREADS,!FAIL_PREREQS \
 	git pack-objects --threads=2 --stdout --all </dev/null >/dev/null 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring --threads" err &&
+	test_grep -F "no threads support, ignoring --threads" err &&
 
 	git -c pack.threads=2 pack-objects --stdout --all </dev/null >/dev/null 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 1 warnings &&
-	grep -F "no threads support, ignoring pack.threads" err &&
+	test_grep -F "no threads support, ignoring pack.threads" err &&
 
 	git -c pack.threads=2 pack-objects --threads=4 --stdout --all </dev/null >/dev/null 2>err &&
 	grep ^warning: err >warnings &&
 	test_line_count = 2 warnings &&
-	grep -F "no threads support, ignoring --threads" err &&
-	grep -F "no threads support, ignoring pack.threads" err
+	test_grep -F "no threads support, ignoring --threads" err &&
+	test_grep -F "no threads support, ignoring pack.threads" err
 '
 
 test_expect_success 'pack-objects in too-many-packs mode' '
@@ -658,7 +658,7 @@ do
 		test_commit -C repo initial &&
 		git -C repo repack -ad &&
 		git -C repo verify-pack "$(pwd)"/repo/.git/objects/pack/*.idx &&
-		if test $hash = sha1
+		if test $hash = $GIT_TEST_BUILTIN_HASH
 		then
 			nongit git verify-pack "$(pwd)"/repo/.git/objects/pack/*.idx
 		else
@@ -676,7 +676,7 @@ do
 		test_commit -C repo initial &&
 		git -C repo repack -ad &&
 		git -C repo index-pack --verify "$(pwd)"/repo/.git/objects/pack/*.pack &&
-		if test $hash = sha1
+		if test $hash = $GIT_TEST_BUILTIN_HASH
 		then
 			nongit git index-pack --verify "$(pwd)"/repo/.git/objects/pack/*.pack
 		else
@@ -688,5 +688,58 @@ do
 		fi
 	'
 done
+
+test_expect_success 'valid and invalid --name-hash-versions' '
+	sane_unset GIT_TEST_NAME_HASH_VERSION &&
+
+	# Valid values are hard to verify other than "do not fail".
+	# Performance tests will be more valuable to validate these versions.
+	# Negative values are converted to version 1.
+	for value in -1 1 2
+	do
+		git pack-objects base --all --name-hash-version=$value || return 1
+	done &&
+
+	# Invalid values have clear post-conditions.
+	for value in 0 3
+	do
+		test_must_fail git pack-objects base --all --name-hash-version=$value 2>err &&
+		test_grep "invalid --name-hash-version option" err || return 1
+	done
+'
+
+# The following test is not necessarily a permanent choice, but since we do not
+# have a "name hash version" bit in the .bitmap file format, we cannot write the
+# hash values into the .bitmap file without risking breakage later.
+#
+# TODO: Make these compatible in the future and replace this test with the
+# expected behavior when both are specified.
+test_expect_success '--name-hash-version=2 and --write-bitmap-index are incompatible' '
+	git pack-objects base --all --name-hash-version=2 --write-bitmap-index 2>err &&
+	test_grep "currently, --write-bitmap-index requires --name-hash-version=1" err &&
+
+	# --stdout option silently removes --write-bitmap-index
+	git pack-objects --stdout --all --name-hash-version=2 --write-bitmap-index >out 2>err &&
+	test_grep ! "currently, --write-bitmap-index requires --name-hash-version=1" err
+'
+
+test_expect_success '--path-walk pack everything' '
+	git -C server rev-parse HEAD >in &&
+	GIT_PROGRESS_DELAY=0 git -C server pack-objects \
+		--stdout --revs --path-walk --progress <in >out.pack 2>err &&
+	test_grep "Compressing objects by path" err &&
+	git -C server index-pack --stdin <out.pack
+'
+
+test_expect_success '--path-walk thin pack' '
+	cat >in <<-EOF &&
+	$(git -C server rev-parse HEAD)
+	^$(git -C server rev-parse HEAD~2)
+	EOF
+	GIT_PROGRESS_DELAY=0 git -C server pack-objects \
+		--thin --stdout --revs --path-walk --progress <in >out.pack 2>err &&
+	test_grep "Compressing objects by path" err &&
+	git -C server index-pack --fix-thin --stdin <out.pack
+'
 
 test_done

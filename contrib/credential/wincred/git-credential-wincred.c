@@ -12,7 +12,9 @@
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
+#ifndef _MSC_VER
 __attribute__((format (printf, 1, 2)))
+#endif
 static void die(const char *err, ...)
 {
 	char msg[4096];
@@ -36,6 +38,14 @@ static void *xmalloc(size_t size)
 
 static WCHAR *wusername, *password, *protocol, *host, *path, target[1024],
 	*password_expiry_utc, *oauth_refresh_token;
+
+static void target_append(const WCHAR *src)
+{
+	size_t avail = ARRAY_SIZE(target) - wcslen(target) - 1; /* -1 for NUL */
+	if (avail < wcslen(src))
+		die("target buffer overflow");
+	wcsncat(target, src, avail);
+}
 
 static void write_item(const char *what, LPCWSTR wbuf, int wlen)
 {
@@ -111,10 +121,10 @@ static int match_part_last(LPCWSTR *ptarget, LPCWSTR want, LPCWSTR delim)
 
 static int match_cred_password(const CREDENTIALW *cred) {
 	int ret;
-	WCHAR *cred_password = xmalloc(cred->CredentialBlobSize);
-	wcsncpy_s(cred_password, cred->CredentialBlobSize,
-		(LPCWSTR)cred->CredentialBlob,
-		cred->CredentialBlobSize / sizeof(WCHAR));
+	size_t wlen = cred->CredentialBlobSize / sizeof(WCHAR);
+	WCHAR *cred_password = xmalloc((wlen + 1) * sizeof(WCHAR));
+	wcsncpy_s(cred_password, wlen + 1,
+		(LPCWSTR)cred->CredentialBlob, wlen);
 	ret = !wcscmp(cred_password, password);
 	free(cred_password);
 	return ret;
@@ -155,7 +165,7 @@ static void get_credential(void)
 			write_item("username", creds[i]->UserName,
 				creds[i]->UserName ? wcslen(creds[i]->UserName) : 0);
 			if (creds[i]->CredentialBlobSize > 0) {
-				secret = xmalloc(creds[i]->CredentialBlobSize);
+				secret = xmalloc(creds[i]->CredentialBlobSize + sizeof(WCHAR));
 				wcsncpy_s(secret, creds[i]->CredentialBlobSize, (LPCWSTR)creds[i]->CredentialBlob, creds[i]->CredentialBlobSize / sizeof(WCHAR));
 				line = wcstok_s(secret, L"\r\n", &remaining_lines);
 				write_item("password", line, line ? wcslen(line) : 0);
@@ -198,8 +208,8 @@ static void store_credential(void)
 
 	if (oauth_refresh_token) {
 		wlen = _scwprintf(L"%s\r\noauth_refresh_token=%s", password, oauth_refresh_token);
-		secret = xmalloc(sizeof(WCHAR) * wlen);
-		_snwprintf_s(secret, sizeof(WCHAR) * wlen, wlen, L"%s\r\noauth_refresh_token=%s", password, oauth_refresh_token);
+		secret = xmalloc((wlen + 1) * sizeof(WCHAR));
+		_snwprintf_s(secret, wlen + 1, wlen, L"%s\r\noauth_refresh_token=%s", password, oauth_refresh_token);
 	} else {
 		secret = _wcsdup(password);
 	}
@@ -328,17 +338,17 @@ int main(int argc, char *argv[])
 
 	/* prepare 'target', the unique key for the credential */
 	wcscpy(target, L"git:");
-	wcsncat(target, protocol, ARRAY_SIZE(target));
-	wcsncat(target, L"://", ARRAY_SIZE(target));
+	target_append(protocol);
+	target_append(L"://");
 	if (wusername) {
-		wcsncat(target, wusername, ARRAY_SIZE(target));
-		wcsncat(target, L"@", ARRAY_SIZE(target));
+		target_append(wusername);
+		target_append(L"@");
 	}
 	if (host)
-		wcsncat(target, host, ARRAY_SIZE(target));
+		target_append(host);
 	if (path) {
-		wcsncat(target, L"/", ARRAY_SIZE(target));
-		wcsncat(target, path, ARRAY_SIZE(target));
+		target_append(L"/");
+		target_append(path);
 	}
 
 	if (!strcmp(argv[1], "get"))

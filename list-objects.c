@@ -14,7 +14,7 @@
 #include "list-objects-filter.h"
 #include "list-objects-filter-options.h"
 #include "packfile.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "trace.h"
 #include "environment.h"
 
@@ -74,7 +74,8 @@ static void process_blob(struct traversal_context *ctx,
 	 * of missing objects.
 	 */
 	if (ctx->revs->exclude_promisor_objects &&
-	    !repo_has_object_file(the_repository, &obj->oid) &&
+	    !odb_has_object(the_repository->objects, &obj->oid,
+			    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR) &&
 	    is_promisor_object(ctx->revs->repo, &obj->oid))
 		return;
 
@@ -166,10 +167,10 @@ static void process_tree(struct traversal_context *ctx,
 	    !revs->include_check_obj(&tree->object, revs->include_check_data))
 		return;
 
-	if (ctx->depth > max_allowed_tree_depth)
+	if (ctx->depth > revs->repo->settings.max_allowed_tree_depth)
 		die("exceeded maximum allowed tree depth");
 
-	failed_parse = parse_tree_gently(tree, 1);
+	failed_parse = repo_parse_tree_gently(the_repository, tree, 1);
 	if (failed_parse) {
 		if (revs->ignore_missing_links)
 			return;

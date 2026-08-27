@@ -173,7 +173,7 @@ test_expect_success 'merge -h with invalid index' '
 		cd broken &&
 		git init &&
 		>.git/index &&
-		test_expect_code 129 git merge -h >usage
+		git merge -h >usage
 	) &&
 	test_grep "[Uu]sage: git merge" broken/usage
 '
@@ -185,8 +185,19 @@ test_expect_success 'reject non-strategy with a git-merge-foo name' '
 test_expect_success 'merge c0 with c1' '
 	echo "OBJID HEAD@{0}: merge c1: Fast-forward" >reflog.expected &&
 
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file  | 2 +-
+	 other | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	 create mode 100644 other
+	EOF
+
 	git reset --hard c0 &&
-	git merge c1 &&
+	git merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual &&
 	verify_merge file result.1 &&
 	verify_head "$c1" &&
 
@@ -203,6 +214,67 @@ test_expect_success 'merge c0 with c1 with --ff-only' '
 	git merge --ff-only HEAD c0 c1 &&
 	verify_merge file result.1 &&
 	verify_head "$c1"
+'
+
+test_expect_success 'the same merge with merge.stat=diffstat' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file  | 2 +-
+	 other | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	 create mode 100644 other
+	EOF
+
+	git reset --hard c0 &&
+	git -c merge.stat=diffstat merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with compact summary' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git merge --compact-summary c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with compact summary' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git merge --compact-summary c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'the same merge with merge.stat=compact' '
+	cat >expect <<-\EOF &&
+	Updating FROM..TO
+	Fast-forward
+	 file        | 2 +-
+	 other (new) | 9 +++++++++
+	 2 files changed, 10 insertions(+), 1 deletion(-)
+	EOF
+
+	git reset --hard c0 &&
+	git -c merge.stat=compact merge c1 >out &&
+	sed -e "1s/^Updating [0-9a-f.]*/Updating FROM..TO/" out >actual &&
+	test_cmp expect actual
 '
 
 test_debug 'git log --graph --decorate --oneline --all'
@@ -260,8 +332,7 @@ test_expect_success 'merge --squash c3 with c7' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -270,8 +341,8 @@ test_expect_success 'merge --squash --autostash conflict does not attempt to app
 	>unrelated &&
 	git add unrelated &&
 	test_must_fail git merge --squash c7 --autostash >out 2>err &&
-	! grep "Applying autostash resulted in conflicts." err &&
-	grep "When finished, apply stashed changes with \`git stash pop\`" out
+	test_grep ! "Applying autostash resulted in conflicts." err &&
+	test_grep "When finished, apply stashed changes with \`git stash pop\`" out
 '
 
 test_expect_success 'merge c3 with c7 with commit.cleanup = scissors' '
@@ -291,8 +362,7 @@ test_expect_success 'merge c3 with c7 with commit.cleanup = scissors' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -315,8 +385,7 @@ test_expect_success 'merge c3 with c7 with --squash commit.cleanup = scissors' '
 	# Conflicts:
 	#	file
 	EOF
-	git cat-file commit HEAD >raw &&
-	sed -e "1,/^$/d" raw >actual &&
+	commit_body HEAD >actual &&
 	test_cmp expect actual
 '
 
@@ -842,7 +911,8 @@ test_expect_success 'merge with conflicted --autostash changes' '
 	git diff >expect &&
 	test_when_finished "test_might_fail git stash drop" &&
 	git merge --autostash c3 2>err &&
-	test_grep "Applying autostash resulted in conflicts." err &&
+	test_grep "applying them" err &&
+	test_grep "resulted in conflicts" err &&
 	git show HEAD:file >merge-result &&
 	test_cmp result.1-9 merge-result &&
 	git stash show -p >actual &&
@@ -916,9 +986,8 @@ test_expect_success 'merge --no-ff --edit' '
 	git reset --hard c0 &&
 	EDITOR=./editor git merge --no-ff --edit c1 &&
 	verify_parents $c0 $c1 &&
-	git cat-file commit HEAD >raw &&
-	grep "work done on the side branch" raw &&
-	sed "1,/^$/d" >actual raw &&
+	commit_body HEAD >actual &&
+	test_grep "work done on the side branch" actual &&
 	test_cmp expected actual
 '
 
@@ -1084,13 +1153,30 @@ test_expect_success 'merge suggests matching remote refname' '
 	git pack-refs --all --prune &&
 
 	test_must_fail git merge not-local 2>stderr &&
-	grep origin/not-local stderr
+	test_grep origin/not-local stderr
 '
 
 test_expect_success 'suggested names are not ambiguous' '
 	git update-ref refs/heads/origin/not-local HEAD &&
 	test_must_fail git merge not-local 2>stderr &&
-	grep remotes/origin/not-local stderr
+	test_grep remotes/origin/not-local stderr
+'
+
+test_expect_success 'merge with no argument defaults to upstream' '
+	test_when_finished "rm -rf upstream downstream" &&
+	git init upstream &&
+	(
+		cd upstream &&
+		test_commit one &&
+		test_commit two
+	) &&
+	git clone upstream downstream &&
+	(
+		cd downstream &&
+		git reset --hard HEAD^ &&
+		git merge &&
+		test_cmp_rev origin/main HEAD
+	)
 '
 
 test_done
